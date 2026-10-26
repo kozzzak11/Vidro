@@ -10,7 +10,7 @@ val keystoreFileEnv = System.getenv("VIDRO_KEYSTORE_FILE")
 val keystoreBase64 = System.getenv("VIDRO_KEYSTORE_BASE64")
 val keystorePassword = System.getenv("VIDRO_KEYSTORE_PASSWORD")
 val keyAliasEnv = System.getenv("VIDRO_KEY_ALIAS")
-val keyPassword = System.getenv("VIDRO_KEY_PASSWORD")
+val keyPasswordEnv = System.getenv("VIDRO_KEY_PASSWORD")
 
 fun decodeKeystore(): File? {
     if (!keystoreFileEnv.isNullOrBlank()) return file(keystoreFileEnv)
@@ -28,6 +28,14 @@ fun decodeKeystore(): File? {
 }
 
 val releaseKeystore = decodeKeystore()
+if (
+    releaseKeystore != null &&
+    (keystorePassword.isNullOrBlank() || keyAliasEnv.isNullOrBlank() || keyPasswordEnv.isNullOrBlank())
+) {
+    throw GradleException(
+        "Release keystore is set but VIDRO_KEYSTORE_PASSWORD, VIDRO_KEY_ALIAS, or VIDRO_KEY_PASSWORD is missing",
+    )
+}
 
 android {
     namespace = "app.vidro"
@@ -45,10 +53,10 @@ android {
     signingConfigs {
         create("release") {
             if (releaseKeystore != null) {
-                storeFile = releaseKeystore
-                storePassword = keystorePassword
-                keyAlias = keyAliasEnv
-                this.keyPassword = keyPassword
+            storeFile = releaseKeystore
+            storePassword = keystorePassword
+            keyAlias = keyAliasEnv
+            keyPassword = keyPasswordEnv
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
