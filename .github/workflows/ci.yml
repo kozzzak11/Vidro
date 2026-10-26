@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build-lint:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests, lint, debug build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest --stacktrace
+      - name: Build signed release APK
+        env:
+          VIDRO_KEYSTORE_BASE64: ${{ secrets.VIDRO_KEYSTORE_BASE64 }}
+          VIDRO_KEYSTORE_PASSWORD: ${{ secrets.VIDRO_KEYSTORE_PASSWORD }}
+          VIDRO_KEY_ALIAS: ${{ secrets.VIDRO_KEY_ALIAS }}
+          VIDRO_KEY_PASSWORD: ${{ secrets.VIDRO_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --stacktrace
+      - name: Check APK is signed and not debuggable
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "APK=$APK"
+          case "$APK" in
+            *unsigned*) echo "Release APK is unsigned"; exit 1 ;;
+          esac
+          BT=$(echo "$ANDROID_HOME"/build-tools/* | awk '{print $1}')
+          "$BT/aapt" dump badging "$APK" | tee /tmp/badging.txt
+          if grep -q "application-debuggable" /tmp/badging.txt; then
+            echo "APK is debuggable"
+            exit 1
+          fi
+          "$BT/apksigner" verify --print-certs "$APK"
+          cp "$APK" Vidro.apk
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite."
+            exit 1
+          fi
+          cat > /tmp/notes.md <<EOF
+          Vidro ${TAG}
+
+          Lightweight Android browser with a native video player and ad blocking.
+
+          - WebView browsing, tabs, bookmarks, history
+          - Media3 player for MP4/WebM, HLS and DASH, with gestures, PiP and a media notification
+          - EasyList, EasyPrivacy and uBlock filter lists
+          EOF
+          sed -i 's/^          //' /tmp/notes.md
+          gh release create "$TAG" Vidro.apk --title "Vidro $TAG" --notes-file /tmp/notes.md --verify-tag

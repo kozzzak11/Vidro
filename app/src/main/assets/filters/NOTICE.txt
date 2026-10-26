@@ -1,0 +1,9 @@
+Filter lists bundled with Vidro are third-party data and stay under their own licenses:
+
+- EasyList and EasyPrivacy — https://easylist.to/pages/licence.html
+- uBlock Origin filters, privacy, quick-fixes and unbreak —
+  https://github.com/uBlockOrigin/uAssets (GPLv3)
+
+Vidro does not claim copyright on these lists. Comment headers were removed
+from the asset copies to keep the package smaller; the texts above are the
+authoritative license pointers.
