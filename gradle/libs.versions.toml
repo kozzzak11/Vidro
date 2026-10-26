@@ -11,6 +11,7 @@ datastore = "1.1.7"
 coroutines = "1.9.0"
 guava = "33.4.0-android"
 junit = "4.13.2"
+profileinstaller = "1.4.1"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "core" }
@@ -36,6 +37,7 @@ media3-datasource = { module = "androidx.media3:media3-datasource", version.ref 
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
 junit = { module = "junit:junit", version.ref = "junit" }
+androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileinstaller" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -10,19 +10,61 @@ object Scripts {
           function abs(u){
             try { return new URL(u, location.href).href; } catch (e) { return u || ''; }
           }
+          var heightRe = new RegExp('(^|[^0-9])(144|240|360|480|720|1080|1440|2160)p?([^0-9]|' + String.fromCharCode(36) + ')', 'i');
+          function push(out, u, label){
+            if (!u || u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) return;
+            var text = (label || '') + ' ' + u;
+            var m = text.match(heightRe);
+            var height = m ? parseInt(m[2], 10) : 0;
+            out.push({u: abs(u), l: label || (height ? (height + 'p') : ''), h: height});
+          }
+          function arm(v){
+            if (!v || v.__vidroHold) return;
+            v.__vidroHold = true;
+            var timer = null;
+            function fire(){
+              var src = v.currentSrc || v.src || '';
+              if (window.VidroJs && src) {
+                try { VidroJs.onLongPress(abs(src)); } catch (e) {}
+              }
+            }
+            v.addEventListener('touchstart', function(e){
+              if (!e.touches || e.touches.length !== 1) return;
+              clearTimeout(timer);
+              timer = setTimeout(fire, 500);
+            }, {passive: true});
+            v.addEventListener('touchmove', function(){ clearTimeout(timer); }, {passive: true});
+            v.addEventListener('touchend', function(){ clearTimeout(timer); }, {passive: true});
+            v.addEventListener('touchcancel', function(){ clearTimeout(timer); }, {passive: true});
+            v.addEventListener('contextmenu', function(e){
+              if (v.tagName !== 'VIDEO') return;
+              e.preventDefault();
+              fire();
+            });
+          }
           function collect(){
             var out = [];
             var nodes = document.querySelectorAll('video');
             for (var i = 0; i < nodes.length; i++) {
               var v = nodes[i];
-              if (v.currentSrc) out.push(abs(v.currentSrc));
-              if (v.src) out.push(abs(v.src));
+              arm(v);
+              if (v.currentSrc) push(out, v.currentSrc, v.getAttribute('title') || '');
+              if (v.src) push(out, v.src, '');
               var sources = v.querySelectorAll('source');
-              for (var j = 0; j < sources.length; j++) if (sources[j].src) out.push(abs(sources[j].src));
+              for (var j = 0; j < sources.length; j++) {
+                var src = sources[j].src || sources[j].getAttribute('src');
+                var label = sources[j].getAttribute('label') || sources[j].getAttribute('title') || sources[j].getAttribute('res') || '';
+                if (src) push(out, src, label);
+              }
             }
             if (window.VidroJs && out.length) {
               try { VidroJs.onVideos(JSON.stringify(out)); } catch (e) {}
             }
+          }
+          var collectTimer = null;
+          function scheduleCollect(){
+            if (collectTimer) return;
+            collectTimer = setTimeout(function(){ collectTimer = null; collect(); }, 500);
           }
           window.__vidroCollect = collect;
           window.__vidroCss = function(chunks){
@@ -49,8 +91,8 @@ object Scripts {
             }
           }, true);
           try {
-            var obs = new MutationObserver(function(){ collect(); });
-            obs.observe(document.documentElement || document, {childList:true, subtree:true, attributes:true, attributeFilter:['src']});
+            var obs = new MutationObserver(function(){ scheduleCollect(); });
+            obs.observe(document.documentElement || document, {childList:true, subtree:true});
           } catch (e) {}
           function reportNav(){
             setTimeout(collect, 350);
@@ -159,7 +201,7 @@ object Scripts {
                 if (video.currentTime < video.duration - 0.3) video.currentTime = video.duration;
               }
             } catch (e) {}
-          }, 700);
+          }, 1000);
         })();
     """.trimIndent()
 
@@ -169,5 +211,38 @@ object Scripts {
     fun cosmeticCall(chunks: List<String>): String {
         val json = JSONArray(chunks).toString()
         return "window.__vidroCss&&window.__vidroCss($json);"
+    }
+
+    fun holdRate(rate: Double): String =
+        "(function(){var v=document.querySelector('video');if(!v)return;if(v.__vidroRate==null)v.__vidroRate=v.playbackRate||1;v.playbackRate=$rate;})();"
+
+    fun holdRelease(): String =
+        "(function(){var v=document.querySelector('video');if(!v)return;var r=v.__vidroRate||1;v.playbackRate=r;})();"
+
+    fun holdSeek(deltaSec: Double): String =
+        "(function(){var v=document.querySelector('video');if(!v||!isFinite(v.currentTime))return;var t=Math.max(0,v.currentTime+($deltaSec));if(isFinite(v.duration)&&v.duration>0)t=Math.min(t,Math.max(0,v.duration-0.05));try{v.currentTime=t;}catch(e){}})();"
+
+    fun objectFit(mode: String): String {
+        val fit = when (mode) {
+            "FILL" -> "cover"
+            "STRETCH" -> "fill"
+            "ORIGINAL" -> "none"
+            else -> "contain"
+        }
+        val original = mode == "ORIGINAL"
+        return """
+            (function(){
+              var v=document.querySelector('video');
+              if(!v)return;
+              v.style.setProperty('object-fit','$fit','important');
+              if($original && v.videoWidth){
+                v.style.setProperty('width',v.videoWidth+'px','important');
+                v.style.setProperty('height',v.videoHeight+'px','important');
+              } else {
+                v.style.setProperty('width','100%','important');
+                v.style.setProperty('height','100%','important');
+              }
+            })();
+        """.trimIndent()
     }
 }

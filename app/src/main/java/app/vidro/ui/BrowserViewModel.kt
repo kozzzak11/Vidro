@@ -2,10 +2,14 @@ package app.vidro.ui
 
 import android.app.Activity
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Parcel
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -20,10 +24,10 @@ import app.vidro.VidroApp
 import app.vidro.browser.AdBlockEngine
 import app.vidro.browser.BrowserHost
 import app.vidro.browser.DetectedVideo
+import app.vidro.browser.FoundSource
 import app.vidro.browser.TabSession
 import app.vidro.browser.applyWebSettings
 import app.vidro.browser.createTabWebView
-import app.vidro.browser.injectPageHelpers
 import app.vidro.browser.isYouTubeHost
 import app.vidro.data.BlockStats
 import app.vidro.data.Bookmark
@@ -31,12 +35,14 @@ import app.vidro.data.HistoryEntry
 import app.vidro.data.TabRecord
 import app.vidro.data.UserSettings
 import app.vidro.engine.AddressBar
+import app.vidro.engine.ExternalLinks
 import app.vidro.engine.FilterMatcher
 import app.vidro.engine.Request
 import app.vidro.engine.ResourceType
 import app.vidro.engine.Scripts
 import app.vidro.engine.SearchEngine
 import app.vidro.engine.UrlSniffer
+import app.vidro.net.isMobileData
 import app.vidro.player.PlayerActivity
 import app.vidro.player.PlayerContract
 import kotlinx.coroutines.Dispatchers
@@ -47,7 +53,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     private val vidro = app as VidroApp
@@ -76,8 +87,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     private var lastAutoAt = 0L
     private var saveJob: Job? = null
     private var publishScheduled = false
+    private val trafficScheduled = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingOpen: String? = null
+    private val sessionUsed = AtomicLong()
+    private val sessionSaved = AtomicLong()
 
     var fileChooser: ((ValueCallback<Array<Uri>>) -> Unit)? = null
     var showFullscreen: ((View, WebChromeClient.CustomViewCallback) -> Unit)? = null
@@ -85,8 +100,25 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
 
     private val _state = MutableStateFlow(BrowserUiState())
     val state: StateFlow<BrowserUiState> = _state.asStateFlow()
+    private val _loadProgress = MutableStateFlow(0)
+    val loadProgress: StateFlow<Int> = _loadProgress.asStateFlow()
+    private val _traffic = MutableStateFlow(SessionTraffic())
+    val traffic: StateFlow<SessionTraffic> = _traffic.asStateFlow()
+
+    private val trimCallbacks = object : ComponentCallbacks2 {
+        override fun onConfigurationChanged(newConfig: Configuration) = Unit
+        override fun onLowMemory() {
+            main.post { trimBackground() }
+        }
+        override fun onTrimMemory(level: Int) {
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW || level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+                main.post { trimBackground() }
+            }
+        }
+    }
 
     init {
+        getApplication<Application>().registerComponentCallbacks(trimCallbacks)
         viewModelScope.launch {
             val saved = withContext(Dispatchers.IO) { db.loadTabs() }
             currentSettings = settingsStore.snapshot()
@@ -99,18 +131,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
                 ensureWeb(tab)
             } else {
                 saved.forEach { record ->
-                    val tab = newSession(record.url, record.title.ifBlank { "Vidro" })
+                    val tab = newSession(record.url, record.title.ifBlank { "Vidro" }, record.id)
                     tab.scrollY = record.scrollY
                     tabs += tab
                 }
                 activeId = tabs.first().id
-                tabs.forEach { tab ->
-                    ensureWeb(tab)
-                    if (tab.url.startsWith("http")) tab.web?.loadUrl(tab.url)
-                }
+                val tab = tabs.first()
+                ensureWeb(tab)
+                restoreOrLoad(tab)
             }
             restored = true
             publish()
+            consumeOpen()
         }
         viewModelScope.launch {
             settingsStore.settings.collect { value ->
@@ -143,7 +175,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     }
 
     fun detach(app: Application) {
-        active()?.web?.onPause()
+        active()?.let { tab ->
+            tab.web?.let { tab.scrollY = it.scrollY }
+            saveWebState(tab)
+            tab.web?.onPause()
+        }
         CookieManager.getInstance().flush()
         tabs.forEach { it.wrapper?.baseContext = app }
         flushStats()
@@ -195,7 +231,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         }
         val tab = newSession(AddressBar.HOME, "Vidro")
         tabs += tab
-        ensureWeb(tab)
         focus(tab.id)
         overlay = Overlay.None
         scheduleSave()
@@ -215,8 +250,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         if (tabs.isEmpty()) {
             val fresh = newSession(AddressBar.HOME, "Vidro")
             tabs += fresh
-            ensureWeb(fresh)
-            activeId = fresh.id
+            activeId = ""
+            focus(fresh.id)
         } else if (activeId == id) {
             focus(tabs[index.coerceAtMost(tabs.lastIndex)].id)
         }
@@ -359,6 +394,20 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         viewModelScope.launch { settingsStore.setWifiOnly(enabled) }
     }
 
+    fun setCapMobileQuality(enabled: Boolean) {
+        viewModelScope.launch { settingsStore.setCapMobileQuality(enabled) }
+    }
+
+    fun openFromIntent(intent: Intent?) {
+        val source = intent ?: return
+        val url = ExternalLinks.urlFrom(source) ?: return
+        source.action = null
+        source.data = null
+        source.removeExtra(Intent.EXTRA_TEXT)
+        pendingOpen = url
+        if (restored) consumeOpen()
+    }
+
     fun updateFilters() {
         viewModelScope.launch {
             publish()
@@ -428,7 +477,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
                 if (tabs.size < 2) {
                     val extra = newSession(AddressBar.HOME, "Новая вкладка")
                     tabs += extra
-                    ensureWeb(extra)
                 }
             }
             when (screen) {
@@ -453,6 +501,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         tab.url = url
         tab.error = null
         tab.progress = 12
+        if (tab.id == activeId) _loadProgress.value = 12
         tab.blocked.set(0)
         tab.savedBytes.set(0)
         tab.videos.clear()
@@ -467,11 +516,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
             }
         }
         scheduleSave()
+        injectCosmetic(tab, url, includeBootstrap = true)
         publish()
     }
 
     override fun onPageFinished(tab: TabSession, url: String) {
         tab.progress = 100
+        if (tab.id == activeId) _loadProgress.value = 0
         tab.error = null
         tab.url = url
         tab.pageUrl.set(url)
@@ -501,18 +552,31 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
 
     override fun onProgress(tab: TabSession, progress: Int) {
         tab.progress = progress
-        if (tab.id == activeId) requestPublish()
+        if (tab.id == activeId) _loadProgress.value = progress.coerceIn(0, 100)
     }
 
-    override fun onVideos(tab: TabSession, urls: List<String>) {
+    override fun onVideos(tab: TabSession, sources: List<FoundSource>) {
         var changed = false
-        urls.forEach { url ->
-            val hit = UrlSniffer.sniff(url, null) ?: return@forEach
-            val before = tab.videos.size
-            tab.remember(hit.url, hit.kind)
-            if (tab.videos.size != before) changed = true
+        sources.forEach { source ->
+            val hit = UrlSniffer.sniff(source.url, null) ?: return@forEach
+            val height = source.height.takeIf { it > 0 } ?: UrlSniffer.guessHeight(source.label, source.url)
+            if (tab.remember(hit.url, hit.kind, source.label, height)) changed = true
         }
         if (changed && tab.id == activeId) requestPublish()
+    }
+
+    override fun onLongPressVideo(tab: TabSession, url: String) {
+        if (tab.id != activeId || playerOpen) return
+        val hit = UrlSniffer.sniff(url, null)
+        if (hit == null) {
+            toast = "Этот поток остаётся на странице"
+            publish()
+            return
+        }
+        val height = UrlSniffer.guessHeight(null, hit.url)
+        tab.remember(hit.url, hit.kind, if (height > 0) "${height}p" else "", height)
+        pendingVideoUrl = hit.url
+        publish()
     }
 
     override fun onPlaying(tab: TabSession, url: String) {
@@ -540,9 +604,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
             tab.blocked.set(0)
             tab.savedBytes.set(0)
         }
-        val web = tab.web ?: return
-        val chunks = if (siteAllows(url)) engine.matcher.cosmeticChunks(url) else emptyList()
-        injectPageHelpers(web, url, chunks, isYouTubeHost(url) && siteAllows(url))
+        injectCosmetic(tab, url, includeBootstrap = false)
         publish()
     }
 
@@ -552,7 +614,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         tab.savedBytes.addAndGet(bytes)
         liveBlocked += 1
         liveBytes += bytes
-        if (tab.id == activeId) requestPublish()
+        noteTraffic(used = 0L, saved = bytes)
+    }
+
+    override fun onFetched(tab: TabSession, type: ResourceType) {
+        if (tab.id != activeId) return
+        noteTraffic(used = FilterMatcher.estimatedBytes(type), saved = 0L)
     }
 
     override fun onDirectVideo(tab: TabSession, url: String) {
@@ -590,14 +657,21 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     override fun onPageError(tab: TabSession, message: String?) {
         tab.error = message
         tab.progress = 0
-        if (tab.id == activeId) publish()
+        if (tab.id == activeId) {
+            _loadProgress.value = 0
+            publish()
+        }
     }
 
     override fun onRenderProcessGone(tab: TabSession) {
         main.post {
             val url = tab.pageUrl.get()
-            destroyWeb(tab)
+            destroyWeb(tab, deleteState = true)
             webGeneration++
+            if (tab.id != activeId) {
+                publish()
+                return@post
+            }
             ensureWeb(tab)
             if (url.startsWith("http")) tab.web?.loadUrl(url)
             publish()
@@ -662,16 +736,54 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
             putExtra(PlayerContract.EXTRA_ORIGIN, AddressBar.originOf(referer))
             putExtra(PlayerContract.EXTRA_COOKIE, cookie)
             putExtra(PlayerContract.EXTRA_UA, ua)
+            putExtra(PlayerContract.EXTRA_VARIANTS, variantsJson(tab))
+            val cap = if (currentSettings.capMobileQuality && context.isMobileData()) 480 else 0
+            putExtra(PlayerContract.EXTRA_MAX_HEIGHT, cap)
         }
+    }
+
+    private fun variantsJson(tab: TabSession): String {
+        val array = JSONArray()
+        tab.videos.values
+            .sortedByDescending { UrlSniffer.rank(it.url, it.kind) }
+            .take(24)
+            .forEach { video ->
+                val height = video.height.takeIf { it > 0 } ?: UrlSniffer.guessHeight(video.label, video.url)
+                array.put(
+                    JSONObject()
+                        .put("u", video.url)
+                        .put("l", labelFor(video))
+                        .put("h", height)
+                        .put("k", video.kind.name),
+                )
+            }
+        return array.toString()
     }
 
     private fun reinjectActive() {
         val tab = active() ?: return
-        val web = tab.web ?: return
         val url = tab.pageUrl.get()
-        if (!url.startsWith("http")) return
-        val chunks = if (siteAllows(url)) engine.matcher.cosmeticChunks(url) else emptyList()
-        injectPageHelpers(web, url, chunks, isYouTubeHost(url) && siteAllows(url))
+        if (!url.startsWith("http") || tab.web == null) return
+        injectCosmetic(tab, url, includeBootstrap = true)
+    }
+
+    private fun injectCosmetic(tab: TabSession, url: String, includeBootstrap: Boolean) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val allow = siteAllows(url)
+            val chunks = if (allow) engine.matcher.cosmeticChunks(url) else emptyList()
+            val youtube = isYouTubeHost(url) && allow
+            withContext(Dispatchers.Main) {
+                val web = tab.web ?: return@withContext
+                if (!url.startsWith("http")) return@withContext
+                if (includeBootstrap) {
+                    web.evaluateJavascript(Scripts.video, null)
+                    if (youtube) web.evaluateJavascript(Scripts.youtube, null)
+                } else {
+                    web.evaluateJavascript("window.__vidroCollect&&window.__vidroCollect();", null)
+                }
+                if (chunks.isNotEmpty()) web.evaluateJavascript(Scripts.cosmeticCall(chunks), null)
+            }
+        }
     }
 
     private fun siteAllows(url: String?): Boolean {
@@ -683,8 +795,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
 
     private fun siteKey(url: String?): String = AddressBar.hostOf(url)?.removePrefix("www.").orEmpty()
 
-    private fun newSession(url: String, title: String) = TabSession(
-        id = UUID.randomUUID().toString(),
+    private fun newSession(url: String, title: String, id: String = UUID.randomUUID().toString()) = TabSession(
+        id = id,
         title = title,
         url = url,
     )
@@ -696,18 +808,104 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     }
 
     private fun focus(id: String) {
+        val previous = tabs.firstOrNull { it.id == activeId }
+        if (previous != null && previous.id != id) park(previous)
         activeId = id
-        tabs.forEach { tab ->
-            if (tab.id == id) tab.web?.onResume() else tab.web?.onPause()
+        val tab = tabs.firstOrNull { it.id == id } ?: return
+        val fresh = tab.web == null
+        val web = ensureWeb(tab)
+        web.onResume()
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         }
+        if (fresh) restoreOrLoad(tab)
+    }
+
+    private fun park(tab: TabSession) {
+        val web = tab.web ?: return
+        tab.scrollY = web.scrollY
+        saveWebState(tab)
+        web.onPause()
+        destroyWeb(tab, deleteState = false)
+    }
+
+    private fun restoreOrLoad(tab: TabSession) {
+        val web = tab.web ?: return
+        val bundle = readWebState(tab.id)
+        val restoredState = bundle != null && runCatching { web.restoreState(bundle) }.getOrNull() != null
+        if (!restoredState) {
+            val url = tab.pageUrl.get()
+            if (url.startsWith("http")) web.loadUrl(url)
+        }
+    }
+
+    private fun stateFile(id: String): File {
+        val dir = File(getApplication<Application>().filesDir, "webstate")
+        if (!dir.exists()) dir.mkdirs()
+        return File(dir, id)
+    }
+
+    private fun saveWebState(tab: TabSession) {
+        val web = tab.web ?: return
+        val bundle = Bundle()
+        val history = web.saveState(bundle)
+        if (history == null || history.size == 0) return
+        val parcel = Parcel.obtain()
+        try {
+            bundle.writeToParcel(parcel, 0)
+            stateFile(tab.id).writeBytes(parcel.marshall())
+        } catch (_: Throwable) {
+        } finally {
+            parcel.recycle()
+        }
+    }
+
+    private fun readWebState(id: String): Bundle? {
+        val file = stateFile(id)
+        if (!file.exists() || file.length() <= 0L || file.length() > 8_000_000L) return null
+        val parcel = Parcel.obtain()
+        return try {
+            val bytes = file.readBytes()
+            parcel.unmarshall(bytes, 0, bytes.size)
+            parcel.setDataPosition(0)
+            Bundle.CREATOR.createFromParcel(parcel).also { it.classLoader = javaClass.classLoader }
+        } catch (_: Throwable) {
+            null
+        } finally {
+            parcel.recycle()
+        }
+    }
+
+    private fun consumeOpen() {
+        val url = pendingOpen ?: return
+        pendingOpen = null
+        load(url)
+    }
+
+    private fun trimBackground() {
+        tabs.filter { it.id != activeId && it.web != null }.forEach(::park)
+        runCatching { CookieManager.getInstance().flush() }
+    }
+
+    private fun noteTraffic(used: Long, saved: Long) {
+        if (used != 0L) sessionUsed.addAndGet(used)
+        if (saved != 0L) sessionSaved.addAndGet(saved)
+        if (!trafficScheduled.compareAndSet(false, true)) return
+        main.postDelayed({
+            trafficScheduled.set(false)
+            _traffic.value = SessionTraffic(sessionUsed.get(), sessionSaved.get())
+        }, 400)
     }
 
     private fun active(): TabSession? = tabs.firstOrNull { it.id == activeId } ?: tabs.firstOrNull()
 
     private fun tabUrl(tab: TabSession?): String = tab?.pageUrl?.get().orEmpty()
 
-    private fun destroyWeb(tab: TabSession) {
-        val web = tab.web ?: return
+    private fun destroyWeb(tab: TabSession, deleteState: Boolean = true) {
+        val web = tab.web ?: run {
+            if (deleteState) stateFile(tab.id).delete()
+            return
+        }
         tab.web = null
         runCatching {
             web.stopLoading()
@@ -717,6 +915,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
             web.removeAllViews()
             web.destroy()
         }
+        if (deleteState) stateFile(tab.id).delete()
     }
 
     private fun scheduleSave() {
@@ -799,17 +998,25 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     }
 
     private fun labelFor(video: DetectedVideo): String {
-        val host = AddressBar.displayHost(video.url)
-        val kind = when (video.kind) {
-            UrlSniffer.Kind.HLS -> "HLS"
-            UrlSniffer.Kind.DASH -> "DASH"
-            UrlSniffer.Kind.PROGRESSIVE -> "MP4"
+        if (video.label.isNotBlank() && !video.label.startsWith("http")) return video.label
+        if (video.height > 0) {
+            val kind = kindLabel(video.kind)
+            return "$kind · ${video.height}p"
         }
+        val host = AddressBar.displayHost(video.url)
+        val kind = kindLabel(video.kind)
         return if (host.isBlank()) kind else "$kind · $host"
     }
 
+    private fun kindLabel(kind: UrlSniffer.Kind): String = when (kind) {
+        UrlSniffer.Kind.HLS -> "HLS"
+        UrlSniffer.Kind.DASH -> "DASH"
+        UrlSniffer.Kind.PROGRESSIVE -> "MP4"
+    }
+
     override fun onCleared() {
-        tabs.toList().forEach(::destroyWeb)
+        getApplication<Application>().unregisterComponentCallbacks(trimCallbacks)
+        tabs.toList().forEach { destroyWeb(it, deleteState = false) }
         super.onCleared()
     }
 

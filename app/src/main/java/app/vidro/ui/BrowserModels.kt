@@ -7,6 +7,8 @@ import app.vidro.data.UserSettings
 
 enum class Overlay { None, Tabs, Bookmarks, History, Settings }
 
+data class SessionTraffic(val used: Long = 0, val saved: Long = 0)
+
 data class TabSnapshot(
     val id: String,
     val title: String,

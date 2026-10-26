@@ -68,6 +68,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -126,6 +128,8 @@ fun BrowserApp(vm: BrowserViewModel) {
         } else {
             Column(Modifier.fillMaxSize()) {
                 TopBar(state, vm)
+                LoadBar(vm)
+                SessionBadge(vm)
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     if (state.home) {
                         HomePane(state, onSubmit = vm::commitAddress, onOpen = vm::load)
@@ -336,15 +340,36 @@ private fun TopBar(state: BrowserUiState, vm: BrowserViewModel) {
                 }
             }
         }
-        if (state.progress in 1..99) {
-            LinearProgressIndicator(
-                progress = { state.progress / 100f },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp).height(2.dp),
-                color = VidroPalette.Lime,
-                trackColor = Color.Transparent,
-            )
-        }
     }
+}
+
+@Composable
+private fun LoadBar(vm: BrowserViewModel) {
+    val progress by vm.loadProgress.collectAsStateWithLifecycle()
+    if (progress in 1..99) {
+        LinearProgressIndicator(
+            progress = { progress / 100f },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp).height(2.dp),
+            color = VidroPalette.Lime,
+            trackColor = Color.Transparent,
+        )
+    }
+}
+
+@Composable
+private fun SessionBadge(vm: BrowserViewModel) {
+    val traffic by vm.traffic.collectAsStateWithLifecycle()
+    if (traffic.used + traffic.saved <= 0L) return
+    Text(
+        "${formatBytes(traffic.used)} · −${formatBytes(traffic.saved)}",
+        color = VidroPalette.Muted,
+        fontSize = 11.sp,
+        modifier = Modifier
+            .padding(start = 22.dp, bottom = 2.dp)
+            .semantics {
+                contentDescription = "Трафик сессии ${formatBytes(traffic.used)}, сэкономлено ${formatBytes(traffic.saved)}"
+            },
+    )
 }
 
 @Composable

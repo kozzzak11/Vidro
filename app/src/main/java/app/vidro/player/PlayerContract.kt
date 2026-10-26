@@ -10,4 +10,6 @@ object PlayerContract {
     const val EXTRA_ORIGIN = "origin"
     const val EXTRA_COOKIE = "cookie"
     const val EXTRA_UA = "ua"
+    const val EXTRA_VARIANTS = "variants"
+    const val EXTRA_MAX_HEIGHT = "maxHeight"
 }

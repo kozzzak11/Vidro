@@ -20,8 +20,11 @@ class FilterMatcher private constructor(
     private val genericCosmeticExceptions: Set<String>,
     private val cosmeticByDomain: Map<String, List<String>>,
     private val cosmeticExceptionsByDomain: Map<String, Set<String>>,
+    private val exceptionByHost: Map<String, List<Rule>>,
+    private val exceptionLoose: List<Rule>,
     val stats: Stats,
 ) {
+    private val cosmeticCache = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     fun shouldBlock(request: Request): Boolean {
         val url = request.url
         if (url.length > 8000) return false
@@ -32,6 +35,14 @@ class FilterMatcher private constructor(
         val host = AddressBar.hostOf(url) ?: return false
         val documentHost = normalizeHost(request.documentHost)
         val thirdParty = documentHost != null && registrable(host) != registrable(documentHost)
+        // Bare allows fall through so an $important block can still win.
+        if (
+            hitsDomain(host, blockedDomains) &&
+            !hitsDomain(host, allowedDomains) &&
+            !exceptionAllows(url, host, documentHost, request.type, thirdParty)
+        ) {
+            return true
+        }
         val urlLower = url.lowercase()
 
         var block = false
@@ -88,6 +99,38 @@ class FilterMatcher private constructor(
         return block
     }
 
+    private fun hitsDomain(host: String, domains: Set<String>): Boolean {
+        var suffix = host
+        while (suffix.isNotEmpty()) {
+            if (suffix in domains) return true
+            val dot = suffix.indexOf('.')
+            if (dot < 0) break
+            suffix = suffix.substring(dot + 1)
+        }
+        return false
+    }
+
+    private fun exceptionAllows(
+        url: String,
+        host: String,
+        documentHost: String?,
+        type: ResourceType,
+        thirdParty: Boolean,
+    ): Boolean {
+        val urlLower = url.lowercase()
+        fun hits(rule: Rule): Boolean =
+            rule.exception && rule.applies(url, urlLower, host, documentHost, type, thirdParty)
+        var suffix = host
+        while (suffix.isNotEmpty()) {
+            val bucket = exceptionByHost[suffix]
+            if (bucket != null && bucket.any(::hits)) return true
+            val dot = suffix.indexOf('.')
+            if (dot < 0) break
+            suffix = suffix.substring(dot + 1)
+        }
+        return exceptionLoose.any(::hits)
+    }
+
     /** Patterns that would block [request], ignoring exceptions. For tests and diagnostics. */
     fun blockingPatterns(request: Request): List<String> {
         val url = request.url
@@ -127,7 +170,15 @@ class FilterMatcher private constructor(
     }
 
     fun cosmeticChunks(host: String?): List<String> {
-        val normalized = normalizeHost(host).orEmpty()
+        val key = normalizeHost(host).orEmpty()
+        cosmeticCache[key]?.let { return it }
+        val built = buildCosmetic(key)
+        if (cosmeticCache.size > 48) cosmeticCache.clear()
+        cosmeticCache[key] = built
+        return built
+    }
+
+    private fun buildCosmetic(normalized: String): List<String> {
         val excluded = HashSet<String>(genericCosmeticExceptions.size + 8)
         excluded.addAll(genericCosmeticExceptions)
         val specific = ArrayList<String>()
@@ -215,6 +266,10 @@ class FilterMatcher private constructor(
                 }
             }
         }
+
+        fun warm() {
+            if (regexBody != null) regex()
+        }
     }
 
     data class Stats(
@@ -290,6 +345,8 @@ class FilterMatcher private constructor(
             val genericExc = HashSet<String>()
             val byDomain = HashMap<String, MutableList<String>>()
             val excByDomain = HashMap<String, MutableSet<String>>()
+            val exceptionByHost = HashMap<String, MutableList<Rule>>()
+            val exceptionLoose = ArrayList<Rule>()
             var network = 0
             var cosmetic = 0
 
@@ -301,10 +358,15 @@ class FilterMatcher private constructor(
                     cosmetic++
                     continue
                 }
-                if (addNetwork(line, blocked, allowed, hostRules, docRules, tokenRules, tokenless, regexRules)) {
+                if (addNetwork(
+                        line, blocked, allowed, hostRules, docRules, tokenRules, tokenless, regexRules,
+                        exceptionByHost, exceptionLoose,
+                    )
+                ) {
                     network++
                 }
             }
+            regexRules.forEach { it.warm() }
 
             return FilterMatcher(
                 blockedDomains = blocked,
@@ -318,6 +380,8 @@ class FilterMatcher private constructor(
                 genericCosmeticExceptions = genericExc,
                 cosmeticByDomain = byDomain,
                 cosmeticExceptionsByDomain = excByDomain,
+                exceptionByHost = exceptionByHost,
+                exceptionLoose = exceptionLoose,
                 stats = Stats(
                     blockedDomains = blocked.size,
                     allowedDomains = allowed.size,
@@ -364,6 +428,8 @@ class FilterMatcher private constructor(
             tokenRules: MutableMap<String, MutableList<Rule>>,
             tokenless: MutableList<Rule>,
             regexRules: MutableList<Rule>,
+            exceptionByHost: MutableMap<String, MutableList<Rule>>,
+            exceptionLoose: MutableList<Rule>,
         ): Boolean {
             var body = line
             val exception = body.startsWith("@@")
@@ -419,6 +485,10 @@ class FilterMatcher private constructor(
                 regexSensitive = regexDelimited?.second == true || options.matchCase,
                 rawPattern = pattern,
             )
+            if (exception) {
+                if (anchor != null) exceptionByHost.getOrPut(anchor) { ArrayList() }.add(rule)
+                else exceptionLoose.add(rule)
+            }
 
             when {
                 anchor != null -> hostRules.getOrPut(anchor) { ArrayList() }.add(rule)

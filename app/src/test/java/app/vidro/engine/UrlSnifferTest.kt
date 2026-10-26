@@ -52,6 +52,15 @@ class UrlSnifferTest {
     }
 
     @Test
+    fun guessHeightReadsCommonTokens() {
+        assertEquals(1080, UrlSniffer.guessHeight("1080p", null))
+        assertEquals(720, UrlSniffer.guessHeight(null, "https://cdn.example.com/v/720p/master.m3u8"))
+        assertEquals(2160, UrlSniffer.guessHeight("2160", "https://cdn.example.com/a.mp4"))
+        assertEquals(0, UrlSniffer.guessHeight("audio", "https://cdn.example.com/a.mp4"))
+        assertEquals(0, UrlSniffer.guessHeight(null, "https://cdn.example.com/v1720.mp4"))
+    }
+
+    @Test
     fun addressBarResolvesSearchAndUrls() {
         assertEquals(AddressBar.HOME, AddressBar.resolve("  ", SearchEngine.DUCKDUCKGO))
         assertEquals("https://example.com/a", AddressBar.resolve("example.com/a", SearchEngine.DUCKDUCKGO))

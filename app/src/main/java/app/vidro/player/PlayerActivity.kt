@@ -18,7 +18,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,7 +35,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -80,6 +82,8 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
@@ -87,6 +91,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import app.vidro.engine.UrlSniffer
 import app.vidro.ui.formatClock
 import app.vidro.ui.theme.VidroPalette
 import app.vidro.ui.theme.VidroTheme
@@ -94,6 +99,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -104,6 +110,7 @@ class PlayerActivity : ComponentActivity() {
     private var playerView: PlayerView? = null
     private val audio by lazy { getSystemService(AudioManager::class.java) }
     private var orientationMode = 2
+    private var orientationTouched = false
     private var hideJob: Job? = null
     private var hintJob: Job? = null
     private var tickerJob: Job? = null
@@ -125,7 +132,113 @@ class PlayerActivity : ComponentActivity() {
     private var gesture by mutableStateOf<String?>(null)
     private var gestureText by mutableStateOf("")
     private var seekHint by mutableStateOf<String?>(null)
+    private var holdLabel by mutableStateOf<String?>(null)
     private var unlockHint by mutableStateOf(false)
+    private var scaleLabel by mutableStateOf(ScaleSession.label())
+    private var qualityMenu by mutableStateOf(false)
+    private var sleepMenu by mutableStateOf(false)
+    private var qualities by mutableStateOf<List<QualityChoice>>(listOf(QualityChoice.auto()))
+    private var qualityId by mutableStateOf("auto")
+    private var sleepLeft by mutableStateOf(0)
+    private var maxHeightCap = 0
+    private var variants = emptyList<PlayVariant>()
+    private var currentUrl = ""
+    private var currentKind = ""
+    private var speedBeforeHold = 1f
+    private var dragOrigin = 0L
+    private var dragBrightness = 0.5f
+    private var dragVolume = 0f
+    private var sleepJob: Job? = null
+    private val holdSeek by lazy {
+        HoldSeekController(
+            scope = lifecycleScope,
+            onFast = { enable ->
+                val controller = mediaController ?: return@HoldSeekController
+                if (enable) {
+                    speedBeforeHold = controller.playbackParameters.speed
+                    controller.setPlaybackSpeed(2f)
+                } else {
+                    controller.setPlaybackSpeed(speedBeforeHold)
+                    speed = speedBeforeHold
+                }
+            },
+            onSeekBy = { delta -> seekBy(delta, hint = false) },
+            onLabel = { holdLabel = it },
+        )
+    }
+
+    private val gestureHandler = object : PlayerGestureHandler {
+        override fun onTap() = toggleControls()
+        override fun onDouble(zone: Int) {
+            when (zone) {
+                -1 -> seekBy(-10_000)
+                1 -> seekBy(10_000)
+                else -> togglePlay()
+            }
+        }
+
+        override fun onPinch(zoom: Float) {
+            ScaleSession.addPinch(zoom)
+            scaleLabel = ScaleSession.label()
+            playerView?.let { applyPlayerScale(it, mediaController?.videoSize?.width ?: 0) }
+        }
+
+        override fun onHoldStart(forward: Boolean) {
+            gesture = null
+            holdSeek.start(forward)
+        }
+
+        override fun onHoldEnd() = holdSeek.stop()
+
+        override fun onDragStart() {
+            holdSeek.stop()
+            dragOrigin = mediaController?.currentPosition ?: position
+            val current = window.attributes.screenBrightness
+            dragBrightness = if (current >= 0f) current else systemBrightness()
+            dragVolume = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+        }
+
+        override fun onDrag(mode: Int, totalX: Float, totalY: Float, width: Float, height: Float) {
+            when (mode) {
+                1 -> {
+                    val length = duration.takeIf { it > 0 } ?: (mediaController?.duration ?: 0L)
+                    val windowMs = if (length > 0) minOf(length, 8 * 60_000L) else 8 * 60_000L
+                    val delta = (totalX / width * windowMs).toLong()
+                    val target = (dragOrigin + delta).let { value ->
+                        if (length > 0) value.coerceIn(0L, length) else value.coerceAtLeast(0L)
+                    }
+                    mediaController?.seekTo(target)
+                    position = target
+                    seekPreview = target
+                    gesture = "seek"
+                    gestureText = formatClock(target)
+                }
+                2 -> {
+                    val next = (dragBrightness - totalY / height).coerceIn(0.01f, 1f)
+                    val attrs = window.attributes
+                    attrs.screenBrightness = next
+                    window.attributes = attrs
+                    gesture = "brightness"
+                    gestureText = "${(next * 100).roundToInt()}%"
+                }
+                3 -> {
+                    val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat().coerceAtLeast(1f)
+                    val next = (dragVolume - totalY / height * max).coerceIn(0f, max)
+                    audio.setStreamVolume(AudioManager.STREAM_MUSIC, next.roundToInt(), 0)
+                    gesture = "volume"
+                    gestureText = "${(next / max * 100).roundToInt()}%"
+                }
+            }
+        }
+
+        override fun onDragEnd() {
+            gesture = null
+        }
+
+        override fun onPip() {
+            if (!locked) enterPip()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -134,6 +247,7 @@ class PlayerActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         title = intent.getStringExtra(PlayerContract.EXTRA_TITLE).orEmpty()
+        enterImmersive()
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 20)
         }
@@ -148,6 +262,11 @@ class PlayerActivity : ComponentActivity() {
         if (!url.isNullOrBlank() && url != mediaController?.currentMediaItem?.localConfiguration?.uri?.toString()) {
             connectAndPlay(intent)
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterImmersive()
     }
 
     override fun onUserLeaveHint() {
@@ -191,7 +310,12 @@ class PlayerActivity : ComponentActivity() {
                         ready = true
                         duration = controller.duration.coerceAtLeast(0L)
                         buffering = false
+                        publishQualities(controller.currentTracks)
                     }
+                }
+
+                override fun onTracksChanged(tracks: Tracks) {
+                    publishQualities(tracks)
                 }
 
                 override fun onPlayerError(playbackError: PlaybackException) {
@@ -202,6 +326,14 @@ class PlayerActivity : ComponentActivity() {
 
                 override fun onVideoSizeChanged(videoSize: VideoSize) {
                     updatePipRatio(videoSize)
+                    playerView?.let { applyPlayerScale(it, videoSize.width) }
+                    if (!orientationTouched && videoSize.width > 0 && videoSize.height > 0) {
+                        requestedOrientation = if (videoSize.width >= videoSize.height) {
+                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        } else {
+                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                        }
+                    }
                 }
             })
             val headers = Bundle().apply {
@@ -215,8 +347,27 @@ class PlayerActivity : ComponentActivity() {
             val command = controller.sendCustomCommand(SessionCommand(PlayerContract.ACTION_HEADERS, Bundle.EMPTY), headers)
             command.addListener({
                 val kind = source.getStringExtra(PlayerContract.EXTRA_KIND)
+                currentKind = kind.orEmpty()
+                currentUrl = url
+                variants = parseVariants(source.getStringExtra(PlayerContract.EXTRA_VARIANTS))
+                maxHeightCap = source.getIntExtra(PlayerContract.EXTRA_MAX_HEIGHT, 0).coerceAtLeast(0)
+                var playUrl = url
+                var playKind = kind
+                if (maxHeightCap > 0 && kind != "HLS" && kind != "DASH") {
+                    val known = variants.firstOrNull { it.url == url }?.height ?: UrlSniffer.guessHeight(null, url)
+                    if (known > maxHeightCap) {
+                        val lower = variants.filter { it.height in 1..maxHeightCap }.maxByOrNull { it.height }
+                        if (lower != null) {
+                            playUrl = lower.url
+                            playKind = lower.kind
+                        }
+                    }
+                }
+                currentUrl = playUrl
+                currentKind = playKind.orEmpty()
+                applyAutoQuality()
                 val item = MediaItem.Builder()
-                    .setUri(url)
+                    .setUri(playUrl)
                     .setMediaMetadata(
                         MediaMetadata.Builder()
                             .setTitle(source.getStringExtra(PlayerContract.EXTRA_TITLE) ?: url)
@@ -224,7 +375,7 @@ class PlayerActivity : ComponentActivity() {
                             .build(),
                     )
                     .apply {
-                        mimeFor(kind)?.let { setMimeType(it) }
+                        mimeFor(playKind)?.let { setMimeType(it) }
                     }
                     .build()
                 controller.setMediaItem(item)
@@ -262,7 +413,7 @@ class PlayerActivity : ComponentActivity() {
         hideJob?.cancel()
         hideJob = lifecycleScope.launch {
             delay(3200)
-            if (playing && error == null && !speedMenu && !locked) controls = false
+            if (playing && error == null && !speedMenu && !qualityMenu && !sleepMenu && !locked) controls = false
         }
     }
 
@@ -287,12 +438,13 @@ class PlayerActivity : ComponentActivity() {
         scheduleHide()
     }
 
-    private fun seekBy(deltaMs: Long) {
+    private fun seekBy(deltaMs: Long, hint: Boolean = true) {
         val controller = mediaController ?: return
         val length = controller.duration.takeIf { it > 0 } ?: duration
         val target = (controller.currentPosition + deltaMs).coerceIn(0L, if (length > 0) length else Long.MAX_VALUE)
         controller.seekTo(target)
         position = target
+        if (!hint) return
         seekHint = if (deltaMs < 0) "−10 с" else "+10 с"
         hintJob?.cancel()
         hintJob = lifecycleScope.launch {
@@ -313,6 +465,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun cycleOrientation() {
+        orientationTouched = true
         orientationMode = (orientationMode + 1) % 3
         requestedOrientation = when (orientationMode) {
             0 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -370,83 +523,7 @@ class PlayerActivity : ComponentActivity() {
                 Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .pointerInput(locked) {
-                        detectTapGestures(
-                            onTap = { toggleControls() },
-                            onDoubleTap = { offset ->
-                                if (locked) return@detectTapGestures
-                                when {
-                                    offset.x < size.width * 0.36f -> seekBy(-10_000)
-                                    offset.x > size.width * 0.64f -> seekBy(10_000)
-                                    else -> togglePlay()
-                                }
-                            },
-                        )
-                    }
-                    .pointerInput(locked) {
-                        if (locked) return@pointerInput
-                        var accumX = 0f
-                        var accumY = 0f
-                        var startX = 0f
-                        var mode = 0
-                        var origin = 0L
-                        var brightnessStart = 0.5f
-                        var volumeStart = 0f
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                accumX = 0f
-                                accumY = 0f
-                                startX = offset.x
-                                mode = 0
-                                origin = mediaController?.currentPosition ?: position
-                                val current = window.attributes.screenBrightness
-                                brightnessStart = if (current >= 0f) current else systemBrightness()
-                                volumeStart = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
-                            },
-                            onDragCancel = { gesture = null },
-                            onDragEnd = { gesture = null },
-                            onDrag = { change, amount ->
-                                change.consume()
-                                accumX += amount.x
-                                accumY += amount.y
-                                val widthPx = size.width.toFloat().coerceAtLeast(1f)
-                                val heightPx = size.height.toFloat().coerceAtLeast(1f)
-                                if (mode == 0 && (abs(accumX) > 28f || abs(accumY) > 28f)) {
-                                    mode = if (abs(accumX) > abs(accumY)) 1 else if (startX < widthPx / 2f) 2 else 3
-                                }
-                                when (mode) {
-                                    1 -> {
-                                        val length = duration.takeIf { it > 0 } ?: (mediaController?.duration ?: 0L)
-                                        val windowMs = if (length > 0) minOf(length, 8 * 60_000L) else 8 * 60_000L
-                                        val delta = (accumX / widthPx * windowMs).toLong()
-                                        val target = (origin + delta).let { value ->
-                                            if (length > 0) value.coerceIn(0L, length) else value.coerceAtLeast(0L)
-                                        }
-                                        mediaController?.seekTo(target)
-                                        position = target
-                                        seekPreview = target
-                                        gesture = "seek"
-                                        gestureText = formatClock(target)
-                                    }
-                                    2 -> {
-                                        val next = (brightnessStart - accumY / heightPx).coerceIn(0.01f, 1f)
-                                        val attrs = window.attributes
-                                        attrs.screenBrightness = next
-                                        window.attributes = attrs
-                                        gesture = "brightness"
-                                        gestureText = "${(next * 100).roundToInt()}%"
-                                    }
-                                    3 -> {
-                                        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat().coerceAtLeast(1f)
-                                        val next = (volumeStart - accumY / heightPx * max).coerceIn(0f, max)
-                                        audio.setStreamVolume(AudioManager.STREAM_MUSIC, next.roundToInt(), 0)
-                                        gesture = "volume"
-                                        gestureText = "${(next / max * 100).roundToInt()}%"
-                                    }
-                                }
-                            },
-                        )
-                    },
+                    .vidroPlayerGestures(locked, gestureHandler),
             ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -458,9 +535,15 @@ class PlayerActivity : ComponentActivity() {
                             setShutterBackgroundColor(android.graphics.Color.BLACK)
                             player = mediaController
                             playerView = this
+                            addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                                applyPlayerScale(this, mediaController?.videoSize?.width ?: 0)
+                            }
                         }
                     },
-                    update = { it.player = mediaController },
+                    update = {
+                        it.player = mediaController
+                        applyPlayerScale(it, mediaController?.videoSize?.width ?: 0)
+                    },
                 )
                 if (buffering && error == null) {
                     CircularProgressIndicator(
@@ -471,9 +554,9 @@ class PlayerActivity : ComponentActivity() {
                 AnimatedVisibility(visible = gesture != null && !inPip, enter = fadeIn(), exit = fadeOut()) {
                     GestureBadge(gesture, gestureText, Modifier.align(Alignment.Center))
                 }
-                if (seekHint != null && !inPip) {
+                if ((seekHint != null || holdLabel != null) && !inPip) {
                     Text(
-                        seekHint.orEmpty(),
+                        holdLabel ?: seekHint.orEmpty(),
                         color = Color.White,
                         fontSize = 28.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -560,6 +643,31 @@ class PlayerActivity : ComponentActivity() {
             Column(
                 Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
+                if (qualityMenu) {
+                    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                        qualities.forEach { choice ->
+                            val selected = choice.id == qualityId
+                            TextButton(
+                                onClick = { selectQuality(choice); qualityMenu = false },
+                                modifier = Modifier.background(
+                                    if (selected) VidroPalette.Lime else Color(0xFF2C3124),
+                                    RoundedCornerShape(12.dp),
+                                ),
+                            ) {
+                                Text(choice.label, color = if (selected) VidroPalette.OnLime else Color.White, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+                if (sleepMenu) {
+                    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(0, 15, 30, 45, 60).forEach { minutes ->
+                            TextButton(onClick = { startSleep(minutes); sleepMenu = false }) {
+                                Text(if (minutes == 0) "Выкл" else "$minutes мин", color = VidroPalette.Lime, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
                 if (speedMenu) {
                     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         speeds.forEach { value ->
@@ -612,7 +720,32 @@ class PlayerActivity : ComponentActivity() {
                     Text("  /  ", color = VidroPalette.Muted, fontSize = 12.sp)
                     Text(formatClock(duration), color = VidroPalette.Muted, fontSize = 12.sp)
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { speedMenu = !speedMenu; controls = true }) {
+                    TextButton(onClick = {
+                        qualityMenu = !qualityMenu
+                        speedMenu = false
+                        sleepMenu = false
+                        controls = true
+                    }) {
+                        Icon(Icons.Filled.HighQuality, contentDescription = "Качество", tint = VidroPalette.Lime, modifier = Modifier.size(18.dp))
+                    }
+                    TextButton(onClick = { cycleScale() }) {
+                        Icon(Icons.Filled.AspectRatio, contentDescription = scaleLabel, tint = VidroPalette.Lime, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(2.dp))
+                        Text(scaleLabel, color = VidroPalette.Lime, fontSize = 12.sp)
+                    }
+                    TextButton(onClick = {
+                        sleepMenu = !sleepMenu
+                        qualityMenu = false
+                        speedMenu = false
+                        controls = true
+                    }) {
+                        Icon(Icons.Filled.Bedtime, contentDescription = "Таймер сна", tint = VidroPalette.Lime, modifier = Modifier.size(18.dp))
+                        if (sleepLeft > 0) {
+                            Spacer(Modifier.width(2.dp))
+                            Text("${sleepLeft}м", color = VidroPalette.Lime, fontSize = 12.sp)
+                        }
+                    }
+                    TextButton(onClick = { speedMenu = !speedMenu; qualityMenu = false; sleepMenu = false; controls = true }) {
                         Icon(Icons.Filled.Speed, contentDescription = null, tint = VidroPalette.Lime, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text(speedLabel(speed), color = VidroPalette.Lime)
@@ -639,6 +772,125 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    private fun cycleScale() {
+        ScaleSession.cycle()
+        scaleLabel = ScaleSession.label()
+        playerView?.let { applyPlayerScale(it, mediaController?.videoSize?.width ?: 0) }
+        controls = true
+        scheduleHide()
+    }
+
+    private fun startSleep(minutes: Int) {
+        sleepJob?.cancel()
+        if (minutes <= 0) {
+            sleepLeft = 0
+            return
+        }
+        val ends = System.currentTimeMillis() + minutes * 60_000L
+        sleepJob = lifecycleScope.launch {
+            while (true) {
+                val left = ends - System.currentTimeMillis()
+                if (left <= 0) {
+                    sleepLeft = 0
+                    mediaController?.pause()
+                    break
+                }
+                sleepLeft = ((left + 59_999) / 60_000L).toInt()
+                delay(1000)
+            }
+        }
+    }
+
+    private fun applyAutoQuality() {
+        val controller = mediaController ?: return
+        qualityId = "auto"
+        val builder = controller.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+        if (maxHeightCap > 0) builder.setMaxVideoSize(Int.MAX_VALUE, maxHeightCap)
+        else builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+        controller.trackSelectionParameters = builder.build()
+    }
+
+    private fun publishQualities(tracks: Tracks) {
+        val options = ArrayList<QualityChoice>()
+        options += QualityChoice.auto()
+        for (group in tracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO) continue
+            for (index in 0 until group.length) {
+                if (!group.isTrackSupported(index)) continue
+                val format = group.getTrackFormat(index)
+                val height = format.height
+                val label = when {
+                    height > 0 -> "${height}p"
+                    format.bitrate > 0 -> "${format.bitrate / 1000} kbps"
+                    else -> "Дорожка ${index + 1}"
+                }
+                options += QualityChoice(
+                    id = "track-$index-${format.bitrate}-${format.height}",
+                    label = label,
+                    height = height,
+                    trackGroup = group.mediaTrackGroup,
+                    trackIndex = index,
+                )
+            }
+        }
+        variants.forEach { variant ->
+            if (variant.url == currentUrl) return@forEach
+            options += QualityChoice(
+                id = "url-${variant.url.hashCode()}",
+                label = variant.label.ifBlank { if (variant.height > 0) "${variant.height}p" else variant.kind },
+                height = variant.height,
+                variant = variant,
+            )
+        }
+        qualities = options.distinctBy { it.id }
+    }
+
+    private fun selectQuality(choice: QualityChoice) {
+        val controller = mediaController ?: return
+        qualityId = choice.id
+        val variant = choice.variant
+        if (variant != null) {
+            val positionNow = controller.currentPosition.coerceAtLeast(0L)
+            val item = MediaItem.Builder()
+                .setUri(variant.url)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(title.ifBlank { variant.label }).setArtist("Vidro").build())
+                .apply { mimeFor(variant.kind)?.let { setMimeType(it) } }
+                .build()
+            currentUrl = variant.url
+            currentKind = variant.kind
+            controller.setMediaItem(item, positionNow)
+            controller.prepare()
+            controller.play()
+            return
+        }
+        val group = choice.trackGroup
+        val builder = controller.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+        if (group != null && choice.trackIndex >= 0) {
+            builder.setOverrideForType(TrackSelectionOverride(group, listOf(choice.trackIndex)))
+            builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+        } else if (maxHeightCap > 0) {
+            builder.setMaxVideoSize(Int.MAX_VALUE, maxHeightCap)
+        } else {
+            builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+        }
+        controller.trackSelectionParameters = builder.build()
+    }
+
+    private fun parseVariants(raw: String?): List<PlayVariant> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    val url = item.optString("u")
+                    if (!url.startsWith("http")) continue
+                    add(PlayVariant(url, item.optString("l"), item.optInt("h"), item.optString("k")))
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
     private fun speedLabel(value: Float): String {
         val rounded = if (value == value.toInt().toFloat()) value.toInt().toString() else value.toString()
         return "$rounded×"
@@ -646,7 +898,25 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         hideJob?.cancel()
+        sleepJob?.cancel()
+        holdSeek.stop()
         window.decorView.keepScreenOn = false
         super.onDestroy()
+    }
+}
+
+private data class PlayVariant(val url: String, val label: String, val height: Int, val kind: String)
+
+@OptIn(UnstableApi::class)
+private data class QualityChoice(
+    val id: String,
+    val label: String,
+    val height: Int = 0,
+    val trackGroup: androidx.media3.common.TrackGroup? = null,
+    val trackIndex: Int = -1,
+    val variant: PlayVariant? = null,
+) {
+    companion object {
+        fun auto() = QualityChoice("auto", "Авто")
     }
 }

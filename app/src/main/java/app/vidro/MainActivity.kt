@@ -1,34 +1,26 @@
 package app.vidro
 
+import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import android.view.View
-import android.view.ViewGroup
 import android.webkit.WebChromeClient
-import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.viewinterop.AndroidView
+import app.vidro.player.WebFullscreen
+import app.vidro.player.enterImmersive
+import app.vidro.player.exitImmersive
 import app.vidro.ui.BrowserApp
 import app.vidro.ui.BrowserViewModel
 import app.vidro.ui.theme.VidroTheme
@@ -54,41 +46,40 @@ class MainActivity : ComponentActivity() {
             fullscreenCallback?.onCustomViewHidden()
             fullscreenCallback = callback
             fullscreenView = view
+            enterImmersive()
         }
         vm.hideFullscreen = { hideCustom() }
+        vm.openFromIntent(intent)
         setContent {
             VidroTheme {
                 val custom = fullscreenView
                 if (custom != null) {
-                    Box(Modifier.fillMaxSize().background(Color.Black)) {
-                        AndroidView(
-                            modifier = Modifier.fillMaxSize(),
-                            factory = { FrameLayout(it) },
-                            update = { frame ->
-                                if (custom.parent !== frame) {
-                                    (custom.parent as? ViewGroup)?.removeView(custom)
-                                    frame.removeAllViews()
-                                    frame.addView(
-                                        custom,
-                                        FrameLayout.LayoutParams(
-                                            ViewGroup.LayoutParams.MATCH_PARENT,
-                                            ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ),
-                                    )
-                                }
-                            },
-                        )
-                        if (!inPip) {
-                            IconButton(onClick = { hideCustom() }, modifier = Modifier.statusBarsPadding()) {
-                                Icon(Icons.Filled.Close, contentDescription = "Закрыть", tint = Color.White)
-                            }
-                        }
-                    }
+                    BackHandler { hideCustom() }
+                    WebFullscreen(
+                        custom = custom,
+                        inPip = inPip,
+                        onClose = { hideCustom() },
+                        onPip = {
+                            if (Build.VERSION.SDK_INT >= 26 && !inPip) enterPictureInPictureMode(pipParams())
+                        },
+                        eval = { js -> vm.webView()?.evaluateJavascript(js, null) },
+                    )
                 } else {
                     BrowserApp(vm)
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        vm.openFromIntent(intent)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && fullscreenView != null) enterImmersive()
     }
 
     override fun onResume() {
@@ -117,6 +108,7 @@ class MainActivity : ComponentActivity() {
         fullscreenView = null
         fullscreenCallback?.onCustomViewHidden()
         fullscreenCallback = null
+        exitImmersive()
     }
 
     private fun pipParams(): android.app.PictureInPictureParams {

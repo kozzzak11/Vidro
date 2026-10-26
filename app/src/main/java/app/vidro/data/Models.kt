@@ -11,6 +11,7 @@ data class UserSettings(
     val openOnFullscreen: Boolean = true,
     val blockPopups: Boolean = true,
     val wifiOnlyFilterUpdates: Boolean = true,
+    val capMobileQuality: Boolean = true,
     val disabledSites: Set<String> = emptySet(),
 )
 

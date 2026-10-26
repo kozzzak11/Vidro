@@ -49,6 +49,14 @@ object UrlSniffer {
         return null
     }
 
+    private val heightHint = Regex("""(?:^|[^0-9])(144|240|360|480|720|1080|1440|2160)p?(?:[^0-9]|$)""", RegexOption.IGNORE_CASE)
+
+    /** Pulls a common resolution token out of a label or URL. 0 if none. */
+    fun guessHeight(label: String?, url: String?): Int {
+        val text = "${label.orEmpty()} ${url.orEmpty()}"
+        return heightHint.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+    }
+
     /** Higher is a better candidate when several URLs were seen on one page. */
     fun rank(url: String, kind: Kind): Int {
         val lower = url.lowercase()

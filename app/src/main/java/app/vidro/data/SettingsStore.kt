@@ -31,6 +31,7 @@ class SettingsStore(context: Context) {
     suspend fun setOpenOnFullscreen(enabled: Boolean) = edit { it[Keys.fullscreen] = enabled }
     suspend fun setBlockPopups(enabled: Boolean) = edit { it[Keys.popups] = enabled }
     suspend fun setWifiOnly(enabled: Boolean) = edit { it[Keys.wifiOnly] = enabled }
+    suspend fun setCapMobileQuality(enabled: Boolean) = edit { it[Keys.capMobile] = enabled }
 
     suspend fun setSiteDisabled(site: String, disabled: Boolean) = edit { prefs ->
         val current = prefs[Keys.sites]?.toMutableSet() ?: mutableSetOf()
@@ -66,6 +67,7 @@ class SettingsStore(context: Context) {
         openOnFullscreen = this[Keys.fullscreen] ?: true,
         blockPopups = this[Keys.popups] ?: true,
         wifiOnlyFilterUpdates = this[Keys.wifiOnly] ?: true,
+        capMobileQuality = this[Keys.capMobile] ?: true,
         disabledSites = this[Keys.sites] ?: emptySet(),
     )
 
@@ -84,6 +86,7 @@ class SettingsStore(context: Context) {
         val fullscreen = booleanPreferencesKey("open_on_fullscreen")
         val popups = booleanPreferencesKey("block_popups")
         val wifiOnly = booleanPreferencesKey("wifi_only_filters")
+        val capMobile = booleanPreferencesKey("cap_mobile_quality")
         val sites = stringSetPreferencesKey("disabled_sites")
         val blocked = longPreferencesKey("total_blocked")
         val bytes = longPreferencesKey("total_bytes")

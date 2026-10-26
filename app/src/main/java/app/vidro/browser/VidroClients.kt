@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.Message
 import android.view.View
 import android.webkit.CookieManager
+import android.view.View.LAYER_TYPE_HARDWARE
 import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
@@ -42,10 +43,12 @@ interface BrowserHost {
     fun onPageFinished(tab: TabSession, url: String)
     fun onTitle(tab: TabSession, title: String)
     fun onProgress(tab: TabSession, progress: Int)
-    fun onVideos(tab: TabSession, urls: List<String>)
+    fun onVideos(tab: TabSession, sources: List<FoundSource>)
+    fun onLongPressVideo(tab: TabSession, url: String)
     fun onPlaying(tab: TabSession, url: String)
     fun onNavigate(tab: TabSession, url: String)
     fun onBlocked(tab: TabSession, type: ResourceType)
+    fun onFetched(tab: TabSession, type: ResourceType)
     fun onDirectVideo(tab: TabSession, url: String)
     fun allowNewWindow(isDialog: Boolean, isUserGesture: Boolean): Boolean
     fun openPopupTab(): WebView?
@@ -115,6 +118,10 @@ fun createTabWebView(tab: TabSession, app: Application, host: BrowserHost): WebV
     web.webViewClient = VidroWebViewClient(tab, host)
     web.webChromeClient = VidroChromeClient(tab, host)
     web.setDownloadListener { _, _, _, _, _ -> host.onDownload() }
+    web.setLayerType(LAYER_TYPE_HARDWARE, null)
+    if (Build.VERSION.SDK_INT >= 26) {
+        web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+    }
     installDocumentScripts(web)
     return web
 }
@@ -150,14 +157,29 @@ private class VidroJs(private val tab: TabSession, private val host: BrowserHost
     @android.webkit.JavascriptInterface
     fun onVideos(json: String) {
         mainHandler.post {
-            val urls = ArrayList<String>()
+            val sources = ArrayList<FoundSource>()
             try {
                 val array = JSONArray(json)
-                for (i in 0 until array.length()) urls.add(array.getString(i))
+                for (i in 0 until array.length()) {
+                    when (val item = array.opt(i)) {
+                        is String -> if (item.isNotBlank()) sources.add(FoundSource(item))
+                        is org.json.JSONObject -> {
+                            val url = item.optString("u")
+                            if (url.isNotBlank()) {
+                                sources.add(FoundSource(url, item.optString("l"), item.optInt("h")))
+                            }
+                        }
+                    }
+                }
             } catch (_: Exception) {
             }
-            host.onVideos(tab, urls)
+            if (sources.isNotEmpty()) host.onVideos(tab, sources)
         }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun onLongPress(url: String) {
+        mainHandler.post { host.onLongPressVideo(tab, url) }
     }
 
     @android.webkit.JavascriptInterface
@@ -208,6 +230,7 @@ private class VidroWebViewClient(
                 return blockedResponse(type)
             }
         }
+        host.onFetched(tab, type)
         val hit = UrlSniffer.sniff(url, null)
         if (hit != null) host.onDirectVideo(tab, hit.url)
         return null
@@ -216,15 +239,11 @@ private class VidroWebViewClient(
     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
         if (url.isNullOrBlank()) return
         host.onPageStarted(tab, url)
-        val chunks = if (host.siteAllowsAdblock(url)) host.engine.matcher.cosmeticChunks(url) else emptyList()
-        injectPageHelpers(view, url, chunks, isYouTubeHost(url) && host.siteAllowsAdblock(url))
     }
 
     override fun onPageFinished(view: WebView, url: String?) {
         if (url.isNullOrBlank()) return
         host.onPageFinished(tab, url)
-        val chunks = if (host.siteAllowsAdblock(url)) host.engine.matcher.cosmeticChunks(url) else emptyList()
-        view.evaluateJavascript(Scripts.cosmeticCall(chunks), null)
         if (tab.scrollY > 0) {
             view.evaluateJavascript("window.scrollTo(0, ${tab.scrollY.coerceAtLeast(0)})", null)
         }
@@ -251,12 +270,6 @@ private class VidroChromeClient(
 ) : WebChromeClient() {
     override fun onProgressChanged(view: WebView?, newProgress: Int) {
         host.onProgress(tab, newProgress)
-        if (newProgress == 100 && view != null) {
-            val url = tab.pageUrl.get()
-            if (host.siteAllowsAdblock(url)) {
-                view.evaluateJavascript(Scripts.cosmeticCall(host.engine.matcher.cosmeticChunks(url)), null)
-            }
-        }
     }
 
     override fun onReceivedTitle(view: WebView?, title: String?) {

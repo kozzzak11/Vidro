@@ -1,0 +1,12 @@
+HSPLapp/vidro/VidroApp;-><init>()V
+HSPLapp/vidro/VidroApp;->onCreate()V
+HSPLapp/vidro/MainActivity;-><init>()V
+HSPLapp/vidro/MainActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLapp/vidro/ui/BrowserViewModel;-><init>(Landroid/app/Application;)V
+HSPLapp/vidro/ui/BrowserAppKt;->BrowserApp(Lapp/vidro/ui/BrowserViewModel;Landroidx/compose/runtime/Composer;I)V
+HSPLapp/vidro/player/PlayerActivity;-><init>()V
+HSPLapp/vidro/player/PlayerActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLapp/vidro/player/PlaybackService;-><init>()V
+HSPLapp/vidro/player/PlaybackService;->onCreate()V
+HSPLapp/vidro/browser/AdBlockEngine;->load(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+HSPLapp/vidro/engine/FilterMatcher$Companion;->compile(Ljava/lang/Iterable;)Lapp/vidro/engine/FilterMatcher;

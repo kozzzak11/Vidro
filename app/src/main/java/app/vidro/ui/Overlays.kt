@@ -241,6 +241,7 @@ private fun SettingsPane(state: BrowserUiState, vm: BrowserViewModel) {
             Card {
                 ToggleRow("Открывать плеер автоматически", "Когда начинается прямое видео", state.settings.autoOpenPlayer, vm::setAutoOpen)
                 ToggleRow("На весь экран — в плеер", "Если поток удалось распознать", state.settings.openOnFullscreen, vm::setOpenOnFullscreen)
+                ToggleRow("На мобильной сети не выше 480p", "На Wi‑Fi качество не ограничивается", state.settings.capMobileQuality, vm::setCapMobileQuality)
             }
         }
         item { SectionTitle("Реклама") }
