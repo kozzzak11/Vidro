@@ -291,9 +291,6 @@ private class VidroChromeClient(
 
     override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
         if (view == null || callback == null) return
-        if (host.takeNativeFullscreen(tab) { callback.onCustomViewHidden() }) {
-            return
-        }
         host.showWebFullscreen(view, callback)
     }
 

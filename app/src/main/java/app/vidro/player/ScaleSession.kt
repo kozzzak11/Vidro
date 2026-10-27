@@ -65,14 +65,8 @@ fun applyPlayerScale(view: PlayerView, videoWidth: Int) {
 
 fun applyWebScale(view: View) {
     val pinch = ScaleSession.pinch.coerceIn(0.5f, 6f)
-    val (sx, sy) = when (ScaleSession.mode) {
-        ScaleSession.Mode.FIT -> pinch to pinch
-        ScaleSession.Mode.FILL -> max(1.12f, pinch) to max(1.12f, pinch)
-        ScaleSession.Mode.STRETCH -> max(1.05f, pinch) to max(1.12f, pinch * 1.05f)
-        ScaleSession.Mode.ORIGINAL -> pinch to pinch
-    }
     view.pivotX = view.width / 2f
     view.pivotY = view.height / 2f
-    view.scaleX = sx
-    view.scaleY = sy
+    view.scaleX = pinch
+    view.scaleY = pinch
 }

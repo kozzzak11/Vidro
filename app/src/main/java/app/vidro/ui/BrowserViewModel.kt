@@ -451,33 +451,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     }
 
     fun consumePlayerIntent(context: android.content.Context): Intent? {
-        val url = pendingVideoUrl ?: return null
         pendingVideoUrl = null
-        val tab = active()
-        val video = tab?.videos?.get(url) ?: url.let { UrlSniffer.sniff(it, null)?.let { hit -> DetectedVideo(hit.url, hit.kind) } }
-        if (tab == null || video == null) {
-            playerOpen = false
-            handoffMs = 0L
-            handoffPlaying = true
-            publish()
-            return null
-        }
-        playerOpen = true
-        publish()
-        return intentFor(context, tab, video)
+        playerOpen = false
+        handoffMs = 0L
+        handoffPlaying = true
+        return null
     }
 
     fun play(url: String? = null) {
-        if (playerOpen || pendingVideoUrl != null) return
-        val tab = active() ?: return
-        val video = if (url == null) {
-            tab.bestVideo()
-        } else {
-            tab.videos[url] ?: UrlSniffer.sniff(url, null)?.let { DetectedVideo(url, it.kind) }
-        }
-        if (video == null) return
-        playerOpen = true
-        queueHandoff(video.url, null)
+        // The native player stays dormant. Fullscreen uses the site's own video element.
     }
 
     private var screensPrepared = false
@@ -602,9 +584,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
             return
         }
         val height = UrlSniffer.guessHeight(null, hit.url)
-        tab.remember(hit.url, hit.kind, if (height > 0) "${height}p" else "", height)
-        playerOpen = true
-        queueHandoff(hit.url, null)
+        if (tab.remember(hit.url, hit.kind, if (height > 0) "${height}p" else "", height)) publish()
     }
 
     override fun onPlaying(tab: TabSession, url: String) {
@@ -612,13 +592,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         tab.remember(hit.url, hit.kind)
         if (tab.id != activeId) return
         publish()
-        if (!currentSettings.autoOpenPlayer || playerOpen || pendingVideoUrl != null) return
-        val now = System.currentTimeMillis()
-        if (url == lastAutoUrl && now - lastAutoAt < 45_000) return
-        lastAutoUrl = url
-        lastAutoAt = now
-        playerOpen = true
-        queueHandoff(hit.url, null)
     }
 
     override fun onNavigate(tab: TabSession, url: String) {
@@ -732,12 +705,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     }
 
     override fun takeNativeFullscreen(tab: TabSession, hidePageFullscreen: () -> Unit): Boolean {
-        if (!currentSettings.openOnFullscreen || playerOpen || pendingVideoUrl != null) return false
-        if (tab.id != activeId) return false
-        val video = tab.bestVideo() ?: return false
-        playerOpen = true
-        queueHandoff(video.url, hidePageFullscreen)
-        return true
+        // Fullscreen stays on the site's player. Never open a second stream.
+        return false
     }
 
     override fun onDownload() {

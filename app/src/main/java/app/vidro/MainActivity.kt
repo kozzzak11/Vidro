@@ -1,6 +1,7 @@
 package app.vidro
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
@@ -15,10 +16,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.vidro.player.WebFullscreen
+import app.vidro.ui.formatBytes
 import app.vidro.player.enterImmersive
 import app.vidro.player.exitImmersive
 import app.vidro.ui.BrowserApp
@@ -30,6 +36,8 @@ class MainActivity : ComponentActivity() {
     private var fullscreenView by mutableStateOf<View?>(null)
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private var inPip by mutableStateOf(false)
+    private var orientationBeforeFullscreen: Int? = null
+    private var hidingFullscreen = false
 
     private val pickFile = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         vm.onFileChosen(uri)
@@ -43,8 +51,12 @@ class MainActivity : ComponentActivity() {
         )
         vm.fileChooser = { pickFile.launch("*/*") }
         vm.showFullscreen = { view, callback ->
-            fullscreenCallback?.onCustomViewHidden()
+            hideCustom()
             fullscreenCallback = callback
+            if (orientationBeforeFullscreen == null) {
+                orientationBeforeFullscreen = requestedOrientation
+            }
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             fullscreenView = view
             enterImmersive()
         }
@@ -52,20 +64,28 @@ class MainActivity : ComponentActivity() {
         vm.openFromIntent(intent)
         setContent {
             VidroTheme {
-                val custom = fullscreenView
-                if (custom != null) {
-                    BackHandler { hideCustom() }
-                    WebFullscreen(
-                        custom = custom,
-                        inPip = inPip,
-                        onClose = { hideCustom() },
-                        onPip = {
-                            if (Build.VERSION.SDK_INT >= 26 && !inPip) enterPictureInPictureMode(pipParams())
-                        },
-                        eval = { js -> vm.webView()?.evaluateJavascript(js, null) },
-                    )
+                val traffic by vm.traffic.collectAsStateWithLifecycle()
+                val trafficLabel = if (traffic.used + traffic.saved > 0L) {
+                    "${formatBytes(traffic.used)} · −${formatBytes(traffic.saved)}"
                 } else {
+                    null
+                }
+                Box(Modifier.fillMaxSize()) {
                     BrowserApp(vm)
+                    val custom = fullscreenView
+                    if (custom != null) {
+                        BackHandler { hideCustom() }
+                        WebFullscreen(
+                            custom = custom,
+                            inPip = inPip,
+                            trafficLabel = trafficLabel,
+                            onClose = { hideCustom() },
+                            onPip = {
+                                if (Build.VERSION.SDK_INT >= 26 && !inPip) enterPictureInPictureMode(pipParams())
+                            },
+                            eval = { js -> vm.webView()?.evaluateJavascript(js, null) },
+                        )
+                    }
                 }
             }
         }
@@ -105,10 +125,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun hideCustom() {
+        if (hidingFullscreen) return
+        val callback = fullscreenCallback
+        if (fullscreenView == null && callback == null) return
+        hidingFullscreen = true
         fullscreenView = null
-        fullscreenCallback?.onCustomViewHidden()
         fullscreenCallback = null
+        orientationBeforeFullscreen?.let { requestedOrientation = it }
+        orientationBeforeFullscreen = null
         exitImmersive()
+        try {
+            callback?.onCustomViewHidden()
+        } finally {
+            hidingFullscreen = false
+        }
     }
 
     private fun pipParams(): android.app.PictureInPictureParams {

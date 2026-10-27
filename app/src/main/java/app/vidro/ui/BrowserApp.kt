@@ -8,8 +8,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -41,7 +39,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -87,7 +84,6 @@ fun BrowserApp(vm: BrowserViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    var picking by remember { mutableStateOf(false) }
     val playerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
     ) { result -> vm.onPlayerClosed(result.data) }
@@ -110,9 +106,8 @@ fun BrowserApp(vm: BrowserViewModel) {
         }
     }
 
-    BackHandler(enabled = state.overlay != Overlay.None || picking || state.canGoBack || !state.home) {
+    BackHandler(enabled = state.overlay != Overlay.None || state.canGoBack || !state.home) {
         when {
-            picking -> picking = false
             state.overlay != Overlay.None -> vm.dismissOverlay()
             state.canGoBack -> vm.goBack()
             !state.home -> vm.load(app.vidro.engine.AddressBar.HOME)
@@ -138,14 +133,6 @@ fun BrowserApp(vm: BrowserViewModel) {
                         state.error?.let { message ->
                             ErrorCard(message, onRetry = vm::reload, modifier = Modifier.align(Alignment.Center))
                         }
-                        VideoFab(
-                            visible = state.videos.isNotEmpty(),
-                            modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(16.dp),
-                            onClick = {
-                                if (state.videos.size > 1) picking = true
-                                else vm.play()
-                            },
-                        )
                     }
                 }
             }
@@ -153,39 +140,7 @@ fun BrowserApp(vm: BrowserViewModel) {
         AnimatedVisibility(visible = state.overlay != Overlay.None, enter = fadeIn(), exit = fadeOut()) {
             OverlayHost(state, vm)
         }
-        if (picking) {
-            VideoPicker(state.videos, onDismiss = { picking = false }) { url ->
-                picking = false
-                vm.play(url)
-            }
-        }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp))
-    }
-}
-
-@Composable
-private fun VideoFab(visible: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = scaleIn() + fadeIn(),
-        exit = scaleOut() + fadeOut(),
-        modifier = modifier,
-    ) {
-        Box(
-            Modifier
-                .size(58.dp)
-                .clip(CircleShape)
-                .background(VidroPalette.Lime)
-                .clickable(onClick = onClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Filled.PlayArrow,
-                contentDescription = "Открыть в плеере",
-                tint = VidroPalette.OnLime,
-                modifier = Modifier.size(32.dp),
-            )
-        }
     }
 }
 
@@ -318,15 +273,6 @@ private fun TopBar(state: BrowserUiState, vm: BrowserViewModel) {
                         text = { Text(if (state.desktop) "Мобильная версия" else "Настольная версия") },
                         onClick = { menu = false; vm.toggleDesktop() },
                     )
-                    if (state.videos.isNotEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("Открыть в плеере") },
-                            onClick = {
-                                menu = false
-                                vm.play()
-                            },
-                        )
-                    }
                     if (state.siteKey.isNotBlank()) {
                         DropdownMenuItem(
                             text = { Text(if (state.adblockForSite) "Блокировка включена" else "Блокировка выключена") },
@@ -480,24 +426,5 @@ private fun ErrorCard(message: String, onRetry: () -> Unit, modifier: Modifier) 
             modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(VidroPalette.Lime).clickable(onClick = onRetry).padding(horizontal = 16.dp, vertical = 8.dp),
             fontWeight = FontWeight.SemiBold,
         )
-    }
-}
-
-@Composable
-private fun VideoPicker(videos: List<VideoChoice>, onDismiss: () -> Unit, onPick: (String) -> Unit) {
-    Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable(onClick = onDismiss), contentAlignment = Alignment.BottomCenter) {
-        Column(
-            Modifier.fillMaxWidth().navigationBarsPadding().clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)).background(VidroPalette.Card).padding(16.dp).clickable {},
-        ) {
-            Text("Выберите видео", color = VidroPalette.Text, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            videos.forEach { video ->
-                Text(
-                    video.label,
-                    color = VidroPalette.Text,
-                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onPick(video.url) }.padding(vertical = 12.dp, horizontal = 8.dp),
-                )
-            }
-        }
     }
 }

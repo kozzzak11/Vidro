@@ -282,13 +282,13 @@ object Scripts {
     }
 
     fun holdRate(rate: Double): String =
-        "(function(){var v=document.querySelector('video');if(!v)return;if(v.__vidroRate==null)v.__vidroRate=v.playbackRate||1;v.playbackRate=$rate;})();"
+        "(function(){${PICK_VIDEO}if(!v)return;if(v.__vidroRate==null)v.__vidroRate=v.playbackRate||1;v.playbackRate=$rate;})();"
 
     fun holdRelease(): String =
-        "(function(){var v=document.querySelector('video');if(!v)return;var r=v.__vidroRate||1;v.playbackRate=r;})();"
+        "(function(){${PICK_VIDEO}if(!v)return;var r=v.__vidroRate||1;v.playbackRate=r;})();"
 
     fun holdSeek(deltaSec: Double): String =
-        "(function(){var v=document.querySelector('video');if(!v||!isFinite(v.currentTime))return;var t=Math.max(0,v.currentTime+($deltaSec));if(isFinite(v.duration)&&v.duration>0)t=Math.min(t,Math.max(0,v.duration-0.05));try{v.currentTime=t;}catch(e){}})();"
+        "(function(){${PICK_VIDEO}if(!v||!isFinite(v.currentTime))return;var t=Math.max(0,v.currentTime+($deltaSec));if(isFinite(v.duration)&&v.duration>0)t=Math.min(t,Math.max(0,v.duration-0.05));try{v.currentTime=t;}catch(e){}})();"
 
     fun objectFit(mode: String): String {
         val fit = when (mode) {
@@ -297,20 +297,16 @@ object Scripts {
             "ORIGINAL" -> "none"
             else -> "contain"
         }
-        val original = mode == "ORIGINAL"
         return """
             (function(){
-              var v=document.querySelector('video');
-              if(!v)return;
-              v.style.setProperty('object-fit','$fit','important');
-              if($original && v.videoWidth){
-                v.style.setProperty('width',v.videoWidth+'px','important');
-                v.style.setProperty('height',v.videoHeight+'px','important');
-              } else {
-                v.style.setProperty('width','100%','important');
-                v.style.setProperty('height','100%','important');
+              var nodes=document.querySelectorAll('video');
+              for(var i=0;i<nodes.length;i++){
+                nodes[i].style.setProperty('object-fit','$fit','important');
               }
             })();
         """.trimIndent()
     }
+
+    private const val PICK_VIDEO =
+        "var nodes=document.querySelectorAll('video');var best=null,area=-1;for(var i=0;i<nodes.length;i++){var n=nodes[i];var a=(n.videoWidth||n.clientWidth||0)*(n.videoHeight||n.clientHeight||0);if(!best||a>area){best=n;area=a;}}var v=best||nodes[0];"
 }
