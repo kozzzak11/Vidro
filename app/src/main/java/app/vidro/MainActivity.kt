@@ -84,6 +84,7 @@ class MainActivity : ComponentActivity() {
                                 if (Build.VERSION.SDK_INT >= 26 && !inPip) enterPictureInPictureMode(pipParams())
                             },
                             eval = { js -> vm.webView()?.evaluateJavascript(js, null) },
+                            query = { js, cb -> vm.webView()?.evaluateJavascript(js, cb) },
                         )
                     }
                 }

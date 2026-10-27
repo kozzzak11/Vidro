@@ -281,11 +281,59 @@ object Scripts {
         return "window.__vidroCss&&window.__vidroCss($json);"
     }
 
-    fun holdRate(rate: Double): String =
-        "(function(){${PICK_VIDEO}if(!v)return;if(v.__vidroRate==null)v.__vidroRate=v.playbackRate||1;v.playbackRate=$rate;})();"
+    /**
+     * Sets playbackRate while a finger is held. [gen] lets a late call from an
+     * older hold lose to the release (or a newer hold) that already ran.
+     * If the element rejects the rate, slower steps are tried, down to 1×.
+     */
+    fun holdRate(rate: Double, gen: Int = 0): String =
+        """
+        (function(){
+          ${PICK_VIDEO}
+          if(!v) return '1';
+          var known=v.__vidroGen||0;
+          if($gen>0 && known>$gen) return String(Math.round(v.playbackRate||1));
+          if($gen>0 && known!==$gen){
+            v.__vidroGen=$gen;
+            v.__vidroRate=v.playbackRate||1;
+          } else if(v.__vidroRate==null){
+            v.__vidroRate=v.playbackRate||1;
+          }
+          try { v.preservesPitch=true; } catch(e) {}
+          try { v.webkitPreservesPitch=true; } catch(e) {}
+          var want=Math.round($rate);
+          if(!isFinite(want) || want<1) want=2;
+          var tries=[];
+          for(var r=want;r>=1;r--) tries.push(r);
+          var applied=null;
+          for(var i=0;i<tries.length;i++){
+            try {
+              if(Math.abs((v.playbackRate||0)-tries[i])>0.05) v.playbackRate=tries[i];
+              var got=v.playbackRate;
+              if(isFinite(got) && Math.abs(got-tries[i])<0.25){ applied=got; break; }
+            } catch(e) {}
+          }
+          if(applied==null){
+            try { v.playbackRate=v.__vidroRate||1; } catch(e) {}
+            applied=v.playbackRate||1;
+          }
+          return String(Math.round(applied));
+        })();
+        """.trimIndent()
 
-    fun holdRelease(): String =
-        "(function(){${PICK_VIDEO}if(!v)return;var r=v.__vidroRate||1;v.playbackRate=r;})();"
+    fun holdRelease(gen: Int = 0): String =
+        """
+        (function(){
+          ${PICK_VIDEO}
+          if(!v) return;
+          var known=v.__vidroGen||0;
+          if($gen>0 && known>$gen) return;
+          if($gen>0) v.__vidroGen=$gen;
+          var r=(v.__vidroRate==null)?(v.playbackRate||1):v.__vidroRate;
+          v.__vidroRate=null;
+          try { v.playbackRate=r; } catch(e) {}
+        })();
+        """.trimIndent()
 
     fun holdSeek(deltaSec: Double): String =
         "(function(){${PICK_VIDEO}if(!v||!isFinite(v.currentTime))return;var t=Math.max(0,v.currentTime+($deltaSec));if(isFinite(v.duration)&&v.duration>0)t=Math.min(t,Math.max(0,v.duration-0.05));try{v.currentTime=t;}catch(e){}})();"
