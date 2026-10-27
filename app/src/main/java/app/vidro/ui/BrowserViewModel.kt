@@ -37,6 +37,7 @@ import app.vidro.data.UserSettings
 import app.vidro.engine.AddressBar
 import app.vidro.engine.ExternalLinks
 import app.vidro.engine.FilterMatcher
+import app.vidro.engine.PlaybackHandoff
 import app.vidro.engine.Request
 import app.vidro.engine.ResourceType
 import app.vidro.engine.Scripts
@@ -83,6 +84,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     private var toast: String? = null
     private var pendingVideoUrl: String? = null
     private var playerOpen = false
+    private var handoffMs = 0L
+    private var handoffPlaying = true
+    private var handoffToken = 0
+    private var pendingRestore: PlaybackHandoff? = null
+    private var pageResumed = true
     private var lastAutoUrl: String? = null
     private var lastAutoAt = 0L
     private var saveJob: Job? = null
@@ -170,11 +176,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
     fun webView(): WebView? = active()?.web
 
     fun attach(activity: Activity) {
+        pageResumed = true
         tabs.forEach { it.wrapper?.baseContext = activity }
         active()?.web?.onResume()
+        applyPendingRestore()
     }
 
     fun detach(app: Application) {
+        pageResumed = false
         active()?.let { tab ->
             tab.web?.let { tab.scrollY = it.scrollY }
             saveWebState(tab)
@@ -428,28 +437,47 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         toast = null
     }
 
-    fun onPlayerClosed() {
+    fun onPlayerClosed(result: Intent?) {
         playerOpen = false
+        handoffToken = 0
+        if (result != null && result.hasExtra(PlayerContract.EXTRA_POSITION_MS)) {
+            pendingRestore = PlaybackHandoff(
+                positionMs = result.getLongExtra(PlayerContract.EXTRA_POSITION_MS, 0L).coerceAtLeast(0L),
+                playing = result.getBooleanExtra(PlayerContract.EXTRA_PLAYING, true),
+            )
+        }
+        if (pageResumed) applyPendingRestore()
+        publish()
     }
 
     fun consumePlayerIntent(context: android.content.Context): Intent? {
         val url = pendingVideoUrl ?: return null
         pendingVideoUrl = null
-        val tab = active() ?: return null
-        val video = tab.videos[url] ?: UrlSniffer.sniff(url, null)?.let { DetectedVideo(it.url, it.kind) } ?: return null
+        val tab = active()
+        val video = tab?.videos?.get(url) ?: url.let { UrlSniffer.sniff(it, null)?.let { hit -> DetectedVideo(hit.url, hit.kind) } }
+        if (tab == null || video == null) {
+            playerOpen = false
+            handoffMs = 0L
+            handoffPlaying = true
+            publish()
+            return null
+        }
         playerOpen = true
         publish()
         return intentFor(context, tab, video)
     }
 
-    fun play(context: android.content.Context, url: String? = null): Intent? {
-        val tab = active() ?: return null
-        val video = if (url == null) tab.bestVideo() else tab.videos[url]
-            ?: UrlSniffer.sniff(url, null)?.let { DetectedVideo(url, it.kind) }
-        if (video == null) return null
-        pendingVideoUrl = null
+    fun play(url: String? = null) {
+        if (playerOpen || pendingVideoUrl != null) return
+        val tab = active() ?: return
+        val video = if (url == null) {
+            tab.bestVideo()
+        } else {
+            tab.videos[url] ?: UrlSniffer.sniff(url, null)?.let { DetectedVideo(url, it.kind) }
+        }
+        if (video == null) return
         playerOpen = true
-        return intentFor(context, tab, video)
+        queueHandoff(video.url, null)
     }
 
     private var screensPrepared = false
@@ -575,8 +603,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         }
         val height = UrlSniffer.guessHeight(null, hit.url)
         tab.remember(hit.url, hit.kind, if (height > 0) "${height}p" else "", height)
-        pendingVideoUrl = hit.url
-        publish()
+        playerOpen = true
+        queueHandoff(hit.url, null)
     }
 
     override fun onPlaying(tab: TabSession, url: String) {
@@ -589,8 +617,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         if (url == lastAutoUrl && now - lastAutoAt < 45_000) return
         lastAutoUrl = url
         lastAutoAt = now
-        pendingVideoUrl = hit.url
-        publish()
+        playerOpen = true
+        queueHandoff(hit.url, null)
     }
 
     override fun onNavigate(tab: TabSession, url: String) {
@@ -703,15 +731,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
         hideFullscreen?.invoke()
     }
 
-    override fun prefersNativeFullscreen(tab: TabSession): Boolean {
-        if (!currentSettings.openOnFullscreen) return false
+    override fun takeNativeFullscreen(tab: TabSession, hidePageFullscreen: () -> Unit): Boolean {
+        if (!currentSettings.openOnFullscreen || playerOpen || pendingVideoUrl != null) return false
+        if (tab.id != activeId) return false
         val video = tab.bestVideo() ?: return false
-        main.post {
-            if (!playerOpen) {
-                pendingVideoUrl = video.url
-                publish()
-            }
-        }
+        playerOpen = true
+        queueHandoff(video.url, hidePageFullscreen)
         return true
     }
 
@@ -739,7 +764,52 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app), BrowserHost {
             putExtra(PlayerContract.EXTRA_VARIANTS, variantsJson(tab))
             val cap = if (currentSettings.capMobileQuality && context.isMobileData()) 480 else 0
             putExtra(PlayerContract.EXTRA_MAX_HEIGHT, cap)
+            putExtra(PlayerContract.EXTRA_POSITION_MS, handoffMs.coerceAtLeast(0L))
+            putExtra(PlayerContract.EXTRA_PLAYING, handoffPlaying)
+            handoffMs = 0L
+            handoffPlaying = true
         }
+    }
+
+    /**
+     * Reads the live page position before the player opens. [afterCapture] runs once,
+     * after the read, so a site fullscreen exit cannot zero currentTime first.
+     * Nothing here is written to disk.
+     */
+    private fun queueHandoff(url: String, afterCapture: (() -> Unit)?) {
+        val token = ++handoffToken
+        var delivered = false
+        fun finish(raw: String?) {
+            if (delivered || token != handoffToken) return
+            delivered = true
+            handoffToken = 0
+            val handoff = PlaybackHandoff.parse(raw)
+            handoffMs = handoff.positionMs
+            handoffPlaying = handoff.playing
+            pendingVideoUrl = url
+            runCatching { afterCapture?.invoke() }
+            publish()
+        }
+        val web = active()?.web
+        if (web == null) {
+            finish(null)
+            return
+        }
+        web.evaluateJavascript(Scripts.capturePlayback()) { raw ->
+            main.post { finish(raw) }
+        }
+        main.postDelayed({
+            finish(null)
+        }, 700)
+    }
+
+    private fun applyPendingRestore() {
+        val restore = pendingRestore ?: return
+        if (!pageResumed) return
+        val web = active()?.web ?: return
+        web.onResume()
+        web.evaluateJavascript(Scripts.applyPlayback(restore.positionMs, restore.playing), null)
+        pendingRestore = null
     }
 
     private fun variantsJson(tab: TabSession): String {

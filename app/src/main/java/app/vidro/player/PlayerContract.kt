@@ -12,4 +12,6 @@ object PlayerContract {
     const val EXTRA_UA = "ua"
     const val EXTRA_VARIANTS = "variants"
     const val EXTRA_MAX_HEIGHT = "maxHeight"
+    const val EXTRA_POSITION_MS = "positionMs"
+    const val EXTRA_PLAYING = "playing"
 }

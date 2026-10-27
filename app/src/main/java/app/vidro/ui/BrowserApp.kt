@@ -90,7 +90,7 @@ fun BrowserApp(vm: BrowserViewModel) {
     var picking by remember { mutableStateOf(false) }
     val playerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
-    ) { vm.onPlayerClosed() }
+    ) { result -> vm.onPlayerClosed(result.data) }
 
     LaunchedEffect(state.toast) {
         val message = state.toast ?: return@LaunchedEffect
@@ -143,7 +143,7 @@ fun BrowserApp(vm: BrowserViewModel) {
                             modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(16.dp),
                             onClick = {
                                 if (state.videos.size > 1) picking = true
-                                else vm.play(context)?.let { playerLauncher.launch(it) }
+                                else vm.play()
                             },
                         )
                     }
@@ -156,7 +156,7 @@ fun BrowserApp(vm: BrowserViewModel) {
         if (picking) {
             VideoPicker(state.videos, onDismiss = { picking = false }) { url ->
                 picking = false
-                vm.play(context, url)?.let { playerLauncher.launch(it) }
+                vm.play(url)
             }
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp))
@@ -323,7 +323,7 @@ private fun TopBar(state: BrowserUiState, vm: BrowserViewModel) {
                             text = { Text("Открыть в плеере") },
                             onClick = {
                                 menu = false
-                                vm.play(context)?.let { context.startActivity(it) }
+                                vm.play()
                             },
                         )
                     }

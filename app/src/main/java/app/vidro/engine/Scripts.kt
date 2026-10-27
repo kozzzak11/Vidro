@@ -208,6 +208,74 @@ object Scripts {
     const val PAUSE_MEDIA =
         "(function(){var a=document.querySelectorAll('video,audio');for(var i=0;i<a.length;i++){try{a[i].pause()}catch(e){}}})();"
 
+    /** Reads the page video's currentTime, then pauses every media element so audio does not double. */
+    fun capturePlayback(): String = """
+        (function(){
+          function pick(){
+            var nodes = document.querySelectorAll('video');
+            var playing = null;
+            var playingArea = -1;
+            var largest = null;
+            var largestArea = -1;
+            for (var i = 0; i < nodes.length; i++) {
+              var v = nodes[i];
+              var area = (v.videoWidth || v.clientWidth || 0) * (v.videoHeight || v.clientHeight || 0);
+              if (!largest || area > largestArea) { largest = v; largestArea = area; }
+              if (!v.paused && !v.ended && v.readyState > 0) {
+                if (!playing || area > playingArea) { playing = v; playingArea = area; }
+              }
+            }
+            return playing || largest || nodes[0] || null;
+          }
+          var v = pick();
+          var ms = 0;
+          var playing = 0;
+          if (v) {
+            ms = Math.max(0, Math.round((v.currentTime || 0) * 1000));
+            playing = (!v.paused && !v.ended) ? 1 : 0;
+          }
+          var all = document.querySelectorAll('video,audio');
+          for (var j = 0; j < all.length; j++) { try { all[j].pause(); } catch (e) {} }
+          return ms + '|' + playing;
+        })();
+    """.trimIndent()
+
+    fun applyPlayback(positionMs: Long, play: Boolean): String {
+        val seconds = (positionMs.coerceAtLeast(0L) / 1000.0)
+        val shouldPlay = if (play) "1" else "0"
+        return """
+            (function(){
+              function pick(){
+                var nodes = document.querySelectorAll('video');
+                var largest = null;
+                var largestArea = -1;
+                var timed = null;
+                for (var i = 0; i < nodes.length; i++) {
+                  var v = nodes[i];
+                  var area = (v.videoWidth || v.clientWidth || 0) * (v.videoHeight || v.clientHeight || 0);
+                  if (!largest || area > largestArea) { largest = v; largestArea = area; }
+                  if (!timed || (v.currentTime || 0) > (timed.currentTime || 0)) timed = v;
+                }
+                return largestArea > 0 ? largest : (timed || nodes[0] || null);
+              }
+              var v = pick();
+              if (!v) return;
+              var target = $seconds;
+              function go(){
+                try { v.currentTime = target; } catch (e) {}
+                if ($shouldPlay === 1) {
+                  var pending = v.play();
+                  if (pending && pending.catch) pending.catch(function(){});
+                } else {
+                  try { v.pause(); } catch (e) {}
+                }
+              }
+              if (v.readyState >= 1) go();
+              else v.addEventListener('loadedmetadata', go, {once:true});
+            })();
+        """.trimIndent()
+    }
+
     fun cosmeticCall(chunks: List<String>): String {
         val json = JSONArray(chunks).toString()
         return "window.__vidroCss&&window.__vidroCss($json);"

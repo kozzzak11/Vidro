@@ -58,7 +58,11 @@ interface BrowserHost {
     fun chooseFile(callback: ValueCallback<Array<Uri>>)
     fun showWebFullscreen(view: View, callback: WebChromeClient.CustomViewCallback)
     fun hideWebFullscreen()
-    fun prefersNativeFullscreen(tab: TabSession): Boolean
+    /**
+     * @return true when the native player will take over. [hidePageFullscreen] runs
+     * after the page video's current time has been read, so the site cannot reset it first.
+     */
+    fun takeNativeFullscreen(tab: TabSession, hidePageFullscreen: () -> Unit): Boolean
     fun onDownload()
 }
 
@@ -287,8 +291,7 @@ private class VidroChromeClient(
 
     override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
         if (view == null || callback == null) return
-        if (host.prefersNativeFullscreen(tab)) {
-            callback.onCustomViewHidden()
+        if (host.takeNativeFullscreen(tab) { callback.onCustomViewHidden() }) {
             return
         }
         host.showWebFullscreen(view, callback)

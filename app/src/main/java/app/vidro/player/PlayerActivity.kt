@@ -38,6 +38,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
@@ -149,6 +151,12 @@ class PlayerActivity : ComponentActivity() {
     private var dragBrightness = 0.5f
     private var dragVolume = 0f
     private var sleepJob: Job? = null
+    private var startPositionMs = 0L
+    private var startPlaying = true
+    private var handoffArmed = false
+    private var userSeeked = false
+    private var resultSent = false
+    private var fullscreen by mutableStateOf(true)
     private val holdSeek by lazy {
         HoldSeekController(
             scope = lifecycleScope,
@@ -201,6 +209,7 @@ class PlayerActivity : ComponentActivity() {
         override fun onDrag(mode: Int, totalX: Float, totalY: Float, width: Float, height: Float) {
             when (mode) {
                 1 -> {
+                    userSeeked = true
                     val length = duration.takeIf { it > 0 } ?: (mediaController?.duration ?: 0L)
                     val windowMs = if (length > 0) minOf(length, 8 * 60_000L) else 8 * 60_000L
                     val delta = (totalX / width * windowMs).toLong()
@@ -266,7 +275,7 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) enterImmersive()
+        if (hasFocus && fullscreen) enterImmersive()
     }
 
     override fun onUserLeaveHint() {
@@ -311,6 +320,12 @@ class PlayerActivity : ComponentActivity() {
                         duration = controller.duration.coerceAtLeast(0L)
                         buffering = false
                         publishQualities(controller.currentTracks)
+                        if (handoffArmed && !userSeeked && startPositionMs >= 500 &&
+                            controller.currentPosition + 1_500 < startPositionMs
+                        ) {
+                            controller.seekTo(startPositionMs)
+                        }
+                        handoffArmed = false
                     }
                 }
 
@@ -378,9 +393,17 @@ class PlayerActivity : ComponentActivity() {
                         mimeFor(playKind)?.let { setMimeType(it) }
                     }
                     .build()
-                controller.setMediaItem(item)
+                startPositionMs = source.getLongExtra(PlayerContract.EXTRA_POSITION_MS, 0L).coerceAtLeast(0L)
+                startPlaying = if (source.hasExtra(PlayerContract.EXTRA_PLAYING)) {
+                    source.getBooleanExtra(PlayerContract.EXTRA_PLAYING, true)
+                } else {
+                    true
+                }
+                userSeeked = false
+                handoffArmed = startPositionMs >= 500
+                controller.setMediaItem(item, startPositionMs)
+                controller.playWhenReady = startPlaying
                 controller.prepare()
-                controller.play()
                 ready = true
                 startTicker()
             }, ContextCompat.getMainExecutor(this))
@@ -439,6 +462,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun seekBy(deltaMs: Long, hint: Boolean = true) {
+        userSeeked = true
         val controller = mediaController ?: return
         val length = controller.duration.takeIf { it > 0 } ?: duration
         val target = (controller.currentPosition + deltaMs).coerceIn(0L, if (length > 0) length else Long.MAX_VALUE)
@@ -454,6 +478,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun closePlayer() {
+        publishResult()
         val controller = mediaController
         if (controller != null) {
             runCatching {
@@ -462,6 +487,36 @@ class PlayerActivity : ComponentActivity() {
             controller.pause()
         }
         finish()
+    }
+
+    private fun publishResult() {
+        if (resultSent) return
+        resultSent = true
+        val controller = mediaController
+        var pos = controller?.currentPosition?.takeIf { it >= 0 } ?: position
+        if (pos < 500 && startPositionMs >= 500 && !userSeeked) pos = startPositionMs
+        val wantPlay = when {
+            controller != null -> controller.playWhenReady
+            ready -> playing
+            else -> startPlaying
+        }
+        setResult(
+            RESULT_OK,
+            android.content.Intent().apply {
+                putExtra(PlayerContract.EXTRA_POSITION_MS, pos.coerceAtLeast(0L))
+                putExtra(PlayerContract.EXTRA_PLAYING, wantPlay)
+            },
+        )
+    }
+
+    private fun toggleFullscreen() {
+        if (fullscreen) {
+            // Exit fullscreen back to the page at the native player's current second.
+            closePlayer()
+            return
+        }
+        fullscreen = true
+        enterImmersive()
     }
 
     private fun cycleOrientation() {
@@ -641,7 +696,7 @@ class PlayerActivity : ComponentActivity() {
                 )
             }
             Column(
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().padding(start = 16.dp, end = 56.dp, top = 10.dp, bottom = 10.dp),
             ) {
                 if (qualityMenu) {
                     Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
@@ -700,6 +755,7 @@ class PlayerActivity : ComponentActivity() {
                 Slider(
                     value = sliderValue,
                     onValueChange = {
+                        userSeeked = true
                         seeking = true
                         seekPreview = (it * duration).toLong()
                         position = seekPreview
@@ -751,6 +807,17 @@ class PlayerActivity : ComponentActivity() {
                         Text(speedLabel(speed), color = VidroPalette.Lime)
                     }
                 }
+            }
+            IconButton(
+                onClick = { toggleFullscreen() },
+                modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 4.dp, bottom = 8.dp),
+            ) {
+                Icon(
+                    if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                    contentDescription = if (fullscreen) "Выйти из полноэкранного режима" else "На весь экран",
+                    tint = VidroPalette.Lime,
+                    modifier = Modifier.size(26.dp),
+                )
             }
         }
     }
@@ -897,6 +964,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (isFinishing) publishResult()
         hideJob?.cancel()
         sleepJob?.cancel()
         holdSeek.stop()

@@ -93,6 +93,7 @@ jobs:
 
           - WebView browsing, tabs, bookmarks, history
           - Media3 player for MP4/WebM, HLS and DASH, with gestures, PiP and a media notification
+          - Fullscreen continues from the current second and returns to the page there
           - EasyList, EasyPrivacy and uBlock filter lists
           EOF
           sed -i 's/^          //' /tmp/notes.md
